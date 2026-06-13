@@ -1,0 +1,61 @@
+// great-basin-v1 — FLAGSHIP Basin-&-Range extensional hydrothermal play (doc 05 §7.1).
+//
+// Structure: an alluvium-filled valley over volcanics / carbonate over granite basement,
+// cut by a 60° range-front normal fault (~700 m throw) that is the master structure AND
+// the fluid conduit (isConduit). Geothermal target: a fault-controlled hydrothermal
+// upflow rising along that fault — hot (~220 °C), conductive (saline + altered), with a
+// shallow clay-cap conductor over a deeper propylitically-altered, fractured reservoir.
+// Produces the textbook joint signature: MT/EM conductor + magnetic low (alteration
+// destroys magnetite) + gravity expression of the basin/fault + seismic-imaged structure
+// + a hot well (doc 05 §7.1, §4.2). Local mode, geo-anchorable to Milford/FORGE.
+{
+  "id": "great-basin-v1",
+  "seed": 42,
+
+  "frame": {
+    "mode": "local",
+    "roi":   { "xmin": -6000, "xmax": 6000, "ymin": -6000, "ymax": 6000 },
+    "depthRange": { "zmin": -6000, "zmax": 1700 },
+    "truthGrid": { "dx": 50, "dy": 50, "dz": 20 }
+  },
+
+  "surface": {
+    "kind": "fractal",
+    "baseElev": 1600, "relief": 250, "roughness": 0.7
+  },
+
+  // --- LITHOLOGY: build L(x,y,z) (doc 05 §7.1 structure) ---
+  "layers": [
+    { "unit": "alluvium",         "top": "surface",     "thickness": [200, 500] },
+    { "unit": "volcanics",        "top": "conformable", "thickness": [300, 900] },
+    { "unit": "carbonate",        "top": "conformable", "thickness": [800, 1500] },
+    { "unit": "basement_granite", "top": "conformable", "thickness": "fill" }
+  ],
+  "intrusions": [
+    { "unit": "young_intrusive", "shape": "stock",
+      "center": [1500, -500, -3500], "radiusXY": 1200, "radiusZ": 1800 }
+  ],
+  "faults": [
+    // the range-front master fault + fluid conduit (60° dip, ~700 m throw).
+    { "id": "range-front", "kind": "normal", "dip": 60, "dipAzimuth": 90,
+      "trace": [[-6000, -3000], [6000, 1000]], "throw": 700, "isConduit": true }
+  ],
+
+  // --- STATE: build S(x,y,z) (doc 05 §7.1 geothermal target) ---
+  "geotherm": { "surfaceTemp": 15, "gradient": 45 },  // Basin & Range high gradient
+  "anomalies": [
+    { "id": "upflow", "kind": "hydrothermal-plume",
+      "controlledBy": "range-front",            // rises along the conduit fault
+      "footprint": { "center": [800, 200], "radiusXY": 1500 },
+      "topElev": -200, "bottomElev": -4500,
+      "perturb": {
+        "tempPeak": 220, "alterationFrac": 0.6,  // clay cap up high, propylitic deep
+        "porosityBoost": 0.04, "salinityTDS": 8000,
+        "fractureDensity": 0.5                    // permeable fractured reservoir
+      },
+      "clayCap": { "topElev": -150, "thickness": 250 }  // shallow conductive smile
+    }
+  ],
+
+  "rockPhysics": "default-v1"
+}

@@ -1,0 +1,17 @@
+// unit-cube-v1 acquisition plan (doc 05 §4.3). Deliberately sparse/coarse so the CI
+// smoke build runs in seconds while still exercising every method's geometry.
+{
+  "gravity":  { "spacing": 500 },
+  "magnetics": { "lineSpacing": 500, "altitude": 60, "heading": 90 },
+  "mt":       { "gridSpacing": 1000, "nPeriods": 12, "periods": [0.01, 100] },
+  "em":       { "nSoundings": 4 },
+  "ert":      { "line": [[-900, 0], [900, 0]], "array": "dipole-dipole", "n": 16, "a": 100 },
+  "ip":       { "line": [[-900, 0], [900, 0]], "n": 16, "a": 100 },
+  "seismic":  { "line": [[-900, 0], [900, 0]], "nTraces": 24, "dt": 0.002,
+                "nSamples": 256, "waveletFreq": 30 },
+  "microseismic": { "nEvents": 20, "bValue": 1.0, "mc": -1.0 },
+  "insar":    { "los": [0.6, -0.1, 0.79], "nEpochs": 4, "pixel": 200, "maxUpliftMm": 20 },
+  "wells":    [{ "id": "UC-1", "logs": ["res", "gr", "den", "vp", "temp"] }],
+  "heatflow": { "nPoints": 12 },
+  "geology":  { "nSamples": 32 }
+}

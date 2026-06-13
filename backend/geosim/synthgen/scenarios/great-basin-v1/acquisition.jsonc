@@ -1,0 +1,19 @@
+// great-basin-v1 acquisition plan (doc 05 §4.3) — the full multi-method survey suite over
+// the flagship play. A line A-A' is shot across the range-front fault + upflow so ERT/IP
+// and seismic transect the conductor + structure (doc 05 §4.2 worked examples).
+{
+  "gravity":  { "spacing": 250 },
+  "magnetics": { "lineSpacing": 200, "altitude": 80, "heading": 90 },
+  "mt":       { "gridSpacing": 1000, "nPeriods": 30, "periods": [0.001, 1000] },
+  "em":       { "nSoundings": 16 },
+  "ert":      { "line": [[-3000, 200], [3000, 200]], "array": "dipole-dipole",
+                "n": 64, "a": 50 },
+  "ip":       { "line": [[-3000, 200], [3000, 200]], "n": 64, "a": 50 },
+  "seismic":  { "line": [[-5000, 200], [5000, 200]], "nTraces": 96, "dt": 0.002,
+                "nSamples": 1024, "waveletFreq": 28 },
+  "microseismic": { "nEvents": 60, "bValue": 1.0, "mc": -1.0 },
+  "insar":    { "los": [0.6, -0.1, 0.79], "nEpochs": 8, "pixel": 100, "maxUpliftMm": 40 },
+  "wells":    [{ "id": "GT-1", "logs": ["res", "gr", "den", "vp", "temp"] }],
+  "heatflow": { "nPoints": 24 },
+  "geology":  { "nSamples": 64 }
+}

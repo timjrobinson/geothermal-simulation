@@ -1,0 +1,47 @@
+// unit-cube-v1 — CI smoke scenario (doc 05 §7 row 1).
+//
+// A single conductive cube embedded in a two-layer halfspace: an alluvium cover over a
+// granite basement, with one compact "young_intrusive" body re-used as the geometric
+// "cube" and a co-located hydrothermal-plume STATE perturbation (hot + saline + altered)
+// that makes the cube a strong MT/EM conductor (the round-trip + scoring asserts of
+// doc 05 §7). Deliberately SMALL/coarse so a full build runs in seconds.
+{
+  "id": "unit-cube-v1",
+  "seed": 7,
+
+  "frame": {
+    "mode": "local",
+    "roi":   { "xmin": -1000, "xmax": 1000, "ymin": -1000, "ymax": 1000 },
+    "depthRange": { "zmin": -1500, "zmax": 200 },
+    "truthGrid": { "dx": 100, "dy": 100, "dz": 100 }  // coarse: ~20x20x17 voxels
+  },
+
+  "surface": { "kind": "flat", "baseElev": 100 },
+
+  // --- LITHOLOGY: a simple two-layer halfspace ---
+  "layers": [
+    { "unit": "alluvium",         "top": "surface",     "thickness": 300 },
+    { "unit": "basement_granite", "top": "conformable", "thickness": "fill" }
+  ],
+
+  // the "cube": a compact stock in the basement (small radii → ~cubic block).
+  "intrusions": [
+    { "unit": "young_intrusive", "shape": "stock",
+      "center": [0, 0, -700], "radiusXY": 300, "radiusZ": 300 }
+  ],
+
+  // --- STATE: the conductive cube is primarily a state perturbation (decision #2) ---
+  "geotherm": { "surfaceTemp": 15, "gradient": 35 },
+  "anomalies": [
+    { "id": "cube-conductor", "kind": "hydrothermal-plume",
+      "footprint": { "center": [0, 0], "radiusXY": 350 },
+      "topElev": -400, "bottomElev": -1000,
+      "perturb": {
+        "tempPeak": 180, "alterationFrac": 0.7,
+        "porosityBoost": 0.05, "salinityTDS": 12000, "fractureDensity": 0.4
+      }
+    }
+  ],
+
+  "rockPhysics": "default-v1"
+}
