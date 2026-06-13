@@ -58,7 +58,15 @@ SpatialFrame {
   "lengthUnit": "m",
   "roi":        { "xmin": -5000, "xmax": 5000, "ymin": -5000, "ymax": 5000 }, // Engineering metres
   "depthRange": { "zmin": -8000, "zmax": 2000 },  // Engineering elevation metres (zmax≈surface top)
-  "surfaceModel": "dem:copernicus-30m" | "flat:0" | "synthetic:<id>" | null
+  "surfaceModel": "dem:copernicus-30m" | "flat:0" | "synthetic:<id>" | null,
+
+  // --- georeferencing QUALITY, separate from `mode` (resolves critique #9) ---
+  "georefStatus": "unknown" | "assumed_local" | "anchored" | "validated" | "survey_controlled"
+  // unknown        : no spatial info at all
+  // assumed_local  : local/synthetic; coords are Engineering by fiat, not a real place
+  // anchored       : a rigid transform to a real CRS was ASSIGNED (not checked)
+  // validated      : anchor checked against control (DEM tie, known coords) within tolerance
+  // survey_controlled: positions come from surveyed GNSS/GCPs — authoritative
 }
 ```
 
@@ -72,7 +80,18 @@ crs_elev     = anchor.elevation + z          (θ = rotationDeg)
 
 and the inverse for ingest. `lat/lon` for basemaps comes from `pyproj.Transformer(horizontalCRS → EPSG:4326)`. In local mode the transform is identity (`Engineering == world`).
 
-**Promoting local → georeferenced later:** set `mode`, `horizontalCRS`, `verticalDatum`, `anchor`, `rotationDeg`. Bulk arrays are untouched — only the frame metadata changes, because arrays were always stored in Engineering coordinates. Terrain/basemap can then load. (This is why we never bake CRS coordinates into stored arrays.)
+**Promoting local → georeferenced later:** set `mode`, `horizontalCRS`, `verticalDatum`, `anchor`, `rotationDeg`. Bulk arrays are untouched — only the frame metadata changes, because arrays were always stored in Engineering coordinates. Terrain/basemap can then load.
+
+> **What "zero reprocessing" does and does NOT mean** (resolves critique #9). It means
+> the **array bytes never change** — assigning an anchor is cheap. It does **not** assert
+> the data is now physically correct in the world. Assigning an anchor sets
+> `georefStatus:"anchored"`, **not** `"validated"`. Cases the rigid transform does *not*
+> fix, and which keep a lower status: data authored against a synthetic/flat surface then
+> anchored to a real DEM (depth-below-surface views shift when `surfaceModel` changes —
+> elevation is canonical so arrays are fine, but *derived depth* is not); unknown
+> scale/rotation/handedness; basin-scale projection distortion (not a pure rigid
+> transform — see §3). The UI must show `georefStatus` and never imply local synthetic
+> data became real just because an anchor was set.
 
 ---
 
@@ -132,11 +151,25 @@ Every numeric quantity carries an explicit unit; nothing is dimensionless-by-ass
   | density | kg/m³ |
   | magnetic susceptibility | SI (dimensionless) |
   | seismic velocity | m/s |
-  | chargeability | mV/V (or ms) |
-  | temperature | °C |
+  | chargeability (time-domain) | `chargeability_time_ms` — ms |
+  | chargeability (frequency-domain) | `chargeability_mv_v` — mV/V |
+  | IP phase | `phase_mrad` — mrad |
+  | **temperature (absolute)** | **K (kelvin)** — *not* °C internally (see note) |
+  | temperature **gradient** | K/km |
+  | temperature **uncertainty / Δ** | K |
   | gravity anomaly | mGal |
   | magnetic field | nT |
   | deformation (InSAR) | mm (with time axis) |
+
+> **Temperature is canonical in kelvin, displayed in °C.** `pint` treats `degC` as an
+> *offset* unit: absolute temperatures and temperature *differences* are different
+> quantities, so storing σ or gradients as `degC` silently corrupts arithmetic. We
+> store **absolute temperature in K**, **gradients in K/km**, and **uncertainty/Δ in K**,
+> and convert to °C only for display. (Resolves critique #21.)
+
+> **Chargeability is not one unit.** Time-domain IP (ms) and frequency-domain IP
+> (mV/V) and IP phase (mrad) are distinct measurements — they get **distinct
+> `PropertyTypeKey`s** (above), never collapsed into one canonical unit. (Resolves #22.)
 
 - **Display units** are a UI concern: the viewer/panels can show ft, °F, etc. via the same registry, without touching stored values.
 - A **property type registry** (feeds doc 02 & 08) pins, per property: canonical unit, default colourmap, default log/linear scaling, and sensible display range — so a new survey method declares its property once and the whole stack knows how to handle it.
@@ -163,7 +196,7 @@ frame.georeference(crs, vertical, anchor, rotationDeg)     # promote local → g
 units.to_canonical(value, unit, property_type)  /  units.to_display(...)
 ```
 
-All transforms are pure functions of the `SpatialFrame` + `pyproj`; they record source CRS/datum/unit in provenance so any conversion is reversible and auditable.
+All transforms are pure functions of the `SpatialFrame` + `pyproj`; they record source CRS/datum/unit in provenance. **Reversibility is scoped** (resolves critique #8): affine **unit** conversions and **CRS reprojections** are reversible from recorded params; **vertical-datum** conversions are reversible only with the **geoid model + library version pinned** (recorded in provenance). Derivations that are *not* coordinate transforms (gridding, interpolation, downsampling, inversion) are **repeatable-not-reversible** and live in the provenance `lineage` as derivations, not transforms (doc 02 §7).
 
 ---
 

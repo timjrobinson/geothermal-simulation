@@ -51,9 +51,12 @@ Quantity {
 
 // ---- PropertyTypeKey: the registry handle (doc 01 §5) ----
 PropertyTypeKey = "resistivity" | "conductivity" | "density" | "susceptibility"
-                | "velocity_p" | "velocity_s" | "chargeability" | "temperature"
+                | "velocity_p" | "velocity_s" | "temperature"   // temperature canonical = K (doc 01 §5)
+                | "chargeability_time_ms" | "chargeability_mv_v" | "phase_mrad"  // IP split (doc 01 §5, critique #22)
                 | "gravity_anomaly" | "magnetic_field" | "deformation"
                 | "favorability" | "lithology_class" | "<plugin-registered>"
+// This list is the CANONICAL property-type registry (doc 01 §5 owns unit/colormap/scaling
+// per key; doc 08 lets plugins register new keys). No doc invents property keys outside it.
 
 // ---- AABB: axis-aligned bounding box, Engineering metres ----
 Aabb { "xmin":num,"xmax":num, "ymin":num,"ymax":num, "zmin":num,"zmax":num }
@@ -88,7 +91,8 @@ Dataset {
   "projectId": Id,                 // FK → Project
   "name":      string,             // human label, e.g. "MT inversion — survey A 2024"
   "kind":      "observation" | "propertyModel" | "feature" | "fusedModel",
-  "method":    MethodKey,          // OVERVIEW §3 survey method, or "derived" | "fused" | "synthetic"
+  "method":    MethodKey,          // canonical survey method (registry below)
+  "submethod": string | null,      // canonical subtype, e.g. "reflection" under "seismic" (critique #7)
   "extent":    Aabb,               // Engineering metres; spatial footprint for catalog spatial index
   "time":      TimeAxis | null,    // 4D datasets only
 
@@ -104,9 +108,18 @@ Dataset {
   "payload":        ObservationSet | PropertyModel | GeologicalFeature | FusedEarthModel
 }
 
+// CANONICAL method registry (resolves critique #7). Every doc — ingestion (03),
+// plugins (08), inversion (10) — uses THESE keys, never variants like "seismic_reflection".
+// Subtypes live in the optional `submethod` field, not in new top-level keys.
 MethodKey = "gravity"|"magnetics"|"ert"|"ip"|"em"|"mt"|"seismic"|"microseismic"
           | "insar"|"welllog"|"heatflow"|"geology"|"geochem"
           | "derived"|"fused"|"synthetic"
+
+// submethod: optional disambiguator under a MethodKey. Canonical values:
+//   seismic → "reflection" | "refraction" | "ambient_noise" | "tomography"
+//   em      → "tdem" | "fdem" | "aem"
+//   ert/ip  → "dc_resistivity" | "ip_time" | "ip_freq"
+// A plugin registers (method, submethod) pairs; routing/filtering keys on both.
 ```
 
 | Field | Required | Notes |
@@ -158,7 +171,16 @@ ObservationSet {
 }
 
 ColumnSpec { "name":string, "dtype":"f4"|"f8"|"i4"|"i8"|"bool"|"str",
-             "unit":string|null, "propertyType":PropertyTypeKey|null, "nullValue":number|null }
+             "unit":string|null, "propertyType":PropertyTypeKey|null, "nullValue":number|null,
+             "role":"value"|"sigma"|"coord"|"index"|"meta",  // 'sigma' = per-datum 1σ for the value col it pairs
+             "errorFor":string|null }                        // name of the value column this sigma describes
+
+// ---- Per-observation error convention (REQUIRED for inversion, doc 10; critique #19) ----
+// Every measured `value` column SHOULD have a paired sigma column (role:"sigma", errorFor:"<value>")
+// in the value's unit. Tensors/traces carry an error model in `methodData.errorModel`
+// (e.g. {kind:"relative", floor: <abs>, pct: <%>} or a covariance BulkRef). When a source
+// has no errors, ingestion applies a per-property DEFAULT NOISE FLOOR (from the property
+// registry) and records it in provenance — never silently treats data as error-free.
 Affine2D = [ a, b, c, d, e, f ]   // GDAL-style: x = a + col·b + row·c ; y = d + col·e + row·f (Engineering m)
 ```
 
@@ -197,7 +219,7 @@ PropertyModel {
   },
 
   // ---- support geometry: HOW the field is discretized ----
-  "support": VolumeSupport | Grid2DSupport | MeshSupport,
+  "support": VolumeSupport | Grid2DSupport | SectionSupport | MeshSupport,
 
   // ---- uncertainty (§6). Optional but strongly encouraged. ----
   "uncertainty": UncertaintySpec | null,
@@ -219,10 +241,25 @@ VolumeSupport {
   "rotationDeg": 0.0               // in-plane rotation about Z, vs Engineering axes (usually 0)
 }
 
-// ---- 2D grid (e.g. a depth slice product, an anomaly-derived 2.5D field) ----
+// ---- 2D grid: a HORIZONTAL field at a level (depth slice, anomaly, surface-draped) ----
 Grid2DSupport {
   "kind":"grid2d", "origin":[x0,y0], "spacing":[dx,dy], "shape":[ny,nx],
   "zLevel": number | "surface" | "draped", "transform": Affine2D
+}
+
+// ---- VERTICAL SECTION / CURTAIN: the native output of ERT, 2D seismic, AEM stitches ----
+// (resolves critique #6) — a 2D field on a (distance-along-line × depth/elevation) grid
+// that is EMBEDDED in 3D along an arbitrary polyline. Neither a horizontal grid2d nor a
+// full volume. The viewer renders it as a draped curtain; fusion resamples it onto the
+// fused volume via its embedding.
+SectionSupport {
+  "kind":"section",
+  "polyline": BulkRef,             // path vertices in Engineering XY(Z) — the curtain's trace
+  "alongAxis": { "n": nx, "spacing": number|null, "cumulativeDistRef": BulkRef|null }, // samples along line
+  "vertAxis":  { "n": nz, "kind":"elevation"|"depth_below_surface",
+                 "origin": number, "spacing": number },   // vertical samples (Z-up if elevation)
+  "values": "[nz, nAlong]",        // array shape stored in the Zarr array (vert-major)
+  "drape":  "vertical" | "follow_topography"
 }
 
 // ---- unstructured mesh (inversion native meshes: SimPEG TreeMesh, PyGIMLi tets) ----
@@ -332,7 +369,16 @@ UncertaintySpec {
   "representation": "stddev" | "confidence" | "variance" | "categorical_prob",
   "values": BulkRef,               // SAME support/shape as the PropertyModel values (co-registered)
   "unit":   string,                // canonical unit (stddev) or "fraction"(0..1) for confidence
-  "perCategory": false             // true ⇒ extra axis of class probabilities (lithology fields)
+  "perCategory": false,            // true ⇒ extra axis of class probabilities (lithology fields)
+
+  // ---- uncertainty TIER: how trustworthy the numbers themselves are (resolves critique #12) ----
+  "tier": "quantitative" | "proxy" | "qualitative" | "unknown",
+  // quantitative : derived from a real posterior / propagated calibrated errors
+  // proxy        : magnitude is indicative only (rule-of-thumb σ, uncalibrated transform)
+  // qualitative  : ordinal confidence only — viewers must render it as low/med/high, not a number
+  // unknown      : no basis — treat as un-weightable, NOT as zero
+  "independence": "assumed_independent" | "correlated_unmodeled"
+  // delta-method fusion (doc 07) assumes the former; flag the latter so confidence isn't overstated
 }
 
 ResolutionSpec {
@@ -398,21 +444,27 @@ Step {
   "at":      string                // ISO-8601 UTC
 }
 
-// ---- the auditable, reversible transform record (binds to doc 01) ----
+// ---- coordinate/unit transform record. Reversibility is SCOPED, not blanket (critique #8) ----
 Transform {
   "type": "crs_reproject" | "vertical_datum" | "unit_convert"
         | "engineering_anchor" | "depth_elevation",
   "from": string,                  // e.g. "EPSG:4326" | "ft" | "TVDSS"
   "to":   string,                  // e.g. "EPSG:32612" | "m"  | "elevation"
-  "params": object,                // anchor, rotationDeg, geoid model, pint factor — enough to INVERT
-  "reversible": true               // every transform we apply must be invertible (doc 01 §7)
+  "params": object,                // anchor, rotationDeg, geoid model+version, pint factor
+  "reversible": "exact" | "with_pinned_deps" | "no",
+  // exact            : affine unit_convert, engineering_anchor, depth_elevation, most crs_reproject
+  // with_pinned_deps : vertical_datum — invertible ONLY with the recorded geoid model + lib version
+  // no               : (not used by Transform; non-invertible work is a `Step` derivation, below)
+  "deps": { "library": string, "version": string, "grid": string|null } | null  // for with_pinned_deps
 }
 ```
 
 **Auditability guarantees:**
 
 - **Sources are never mutated** — raw files copied verbatim into the raw store with a `sha256`. (OVERVIEW §5.)
-- **Every coordinate/unit change is a logged `Transform`** carrying enough params to invert it (doc 01 §7: "any conversion is reversible and auditable"). `originCrs`/`originalUnit` on the Dataset mirror the roots for fast filtering.
+- **Two distinct provenance categories (resolves critique #8):**
+  - **`Transform` = coordinate/unit changes** — reversibility scoped per record (`exact` / `with_pinned_deps` / never blanket). `originCrs`/`originalUnit` mirror the roots for fast filtering.
+  - **`Step` = derivations** (gridding, interpolation, downsampling, clipping, inversion, synthesis) — these are **repeatable, not reversible**. Each `Step.code` pins `{module, gitSha}` and `params` so the result is *reproducible*, but the inputs cannot be recovered from the output. The UI/labels must never call these "reversible."
 - **Lineage is a DAG**, so a fused model or a rock-physics derived volume points back through its `inputs[]` to every contributing dataset and ultimately every source file. The UI can render "where did this voxel come from."
 - **Editing a feature** (e.g. dragging a horizon) appends an `edit` Step + new version (§9) rather than overwriting — the prior interpretation stays auditable.
 
@@ -476,33 +528,51 @@ VersionInfo {
   tables/     <datasetId>.parquet            # observation record tables
 ```
 
-### 10.2 Zarr group layout for a PropertyModel (the core convention)
+### 10.2 Zarr group layout — THE authoritative spec (resolves critique #5)
 
-A volume PropertyModel is **one Zarr group**. Multiple co-supported properties (e.g. Vp+Vs from one inversion) may share a group, one array each.
+This is the **single source of truth** for on-disk Zarr structure. Doc 04 (storage),
+doc 06 (viewer), and any writer **link here and do not restate a different layout.**
+The earlier doc-04 `pm_<id>.zarr/0/1/2/...` sketch is **superseded by this.**
+
+A PropertyModel is **one Zarr v3 (sharded) group**. **Each property is a multiscale
+subgroup** whose members are the pyramid levels (`0` = full resolution). Co-supported
+properties (e.g. Vp+Vs) and the sibling sigma/doi arrays are parallel subgroups sharing
+the grid. This merges property-naming (was doc 02) with level-numbering (was doc 04):
 
 ```
-<datasetId>.zarr/                     # Zarr group (Zarr v3, sharded)
-  zarr.json                           # group metadata
-  resistivity/                        # one array per property (name = PropertyTypeKey or label)
-    zarr.json                         # array meta + attrs (below)
-    c/0/0/0 ...                       # chunks
-  resistivity_sigma/                  # uncertainty 1σ, SAME shape/chunks (§6)
-  resistivity_doi/                    # optional DOI surface (2D)
-  _pyramid/                           # multiresolution levels (below)
-    1/ 2/ 3/ ...
+<datasetId>.zarr/                     # Zarr v3 GROUP, sharded
+  zarr.json                           # group meta: multiscales spec, frame ref, propertyType list
+  resistivity/                        # multiscale subgroup for one property
+    0/  c/0/0/0 ...                   #   level 0 = full resolution (chunks under c/)
+    1/  2/  3/ ...                     #   coarser levels: each halves z,y,x (mean/anti-aliased)
+  resistivity_sigma/                  # co-registered 1σ, SAME shape/levels (§6); VARIANCE-correct downsample
+    0/ 1/ 2/ ...
+  resistivity_doi/                    # optional DOI surface (2D, [y,x]); single level ok
+  resistivity_classes/                # OPTIONAL categorical companion (see below)
 ```
+
+**Naming is fixed:** value array = `<propertyType>`; uncertainty = `<propertyType>_sigma`;
+DOI = `<propertyType>_doi`; categorical probabilities = `<propertyType>_classes`. The
+**brick/chunk key is `<property>/<level>/c/<bz>/<by>/<bx>`** — doc 04's brick addressing
+maps 1:1 onto this path.
 
 **Dimension & coordinate convention (binds doc 01):**
 
 | Item | Convention |
 |---|---|
 | **Axis order** | `(z, y, x)` for 3D; `(t, z, y, x)` for 4D — **t and z lead**, x fastest-varying |
-| **Coordinates** | Engineering metres (ENU, Z-up). Stored as Zarr **coordinate arrays** `x`,`y`,`z`(,`t`) per CF conventions, OR implied by `origin`+`spacing` in attrs for regular grids |
+| **Coordinates (REQUIRED minimum)** | regular grids carry `origin`+`spacing` in attrs (Engineering metres) — **this is the mandatory minimum a browser reader can rely on.** Explicit CF coordinate arrays `x,y,z(,t)` are **optional** and only required for *irregular* spacing. (No more "either/or" ambiguity.) |
 | **Z direction** | increasing index = **increasing elevation** (Z-up). Ingestion flips depth-indexed sources. |
-| **Datum/units** | never baked into coords beyond Engineering metres — CRS/datum live in the `SpatialFrame`, not the array (doc 01 §2: arrays always in Engineering coords) |
-| **Fill** | explicit `fill_value` (NaN for floats); masked/outside-DOI cells are NaN, not 0 |
+| **Datum/units** | never baked into coords beyond Engineering metres — CRS/datum live in the `SpatialFrame` (doc 01 §2) |
+| **Fill** | explicit `fill_value` = **NaN** for floats; masked/outside-DOI/outside-coverage cells are NaN, never 0 |
 
-**Per-array attrs (`.zattrs` / array `attributes`)** — the per-property metadata that doc 01 §5 promised feeds here:
+**Categorical / lithology arrays (resolves critique #20).** A `lithology_class`
+PropertyModel uses one of two fixed encodings, declared in attrs:
+- **hard labels:** `(z,y,x)` (or `(t,z,y,x)`) **integer** array + a `categories` attr table `[{id,name,color}]`; `fill_value` = a reserved "no-data" id. Uncertainty = an **entropy/confidence** scalar field, *not* a `_sigma`.
+- **class probabilities:** `(class,z,y,x)` (or `(t,class,z,y,x)`) **float** array summing to 1 across the leading `class` axis, with the `categories` table giving the class order. This is the `perCategory:true` form from §6.
+A continuous-property `_sigma` is **not** valid for categorical fields.
+
+**Per-array attrs (`.zattrs` / array `attributes`):**
 
 ```jsonc
 {
@@ -511,18 +581,20 @@ A volume PropertyModel is **one Zarr group**. Multiple co-supported properties (
   "scaling":       "log",
   "colormap":      "turbo",
   "displayRange":  [1, 10000],
-  "origin":        [x0,y0,z0],     // Engineering m (regular grid)
-  "spacing":       [dz,dy,dx],
+  "origin":        [z0,y0,x0],     // Engineering m, z,y,x order (REQUIRED for regular grids)
+  "spacing":       [dz,dy,dx],     // Engineering m, z,y,x order
   "cellRef":       "center",
-  "_ARRAY_DIMENSIONS": ["z","y","x"]   // xarray/CF interop
+  "_ARRAY_DIMENSIONS": ["z","y","x"],  // xarray/CF interop
+  "categories":    null            // present only for categorical arrays (see above)
 }
 ```
 
 ### 10.3 Chunking & multiresolution
 
-- **Chunking hint (doc 04 tunes):** roughly **isotropic cubic chunks** (default target `64³`, ~1 MB at f4) so arbitrary slice planes (XY/XZ/YZ) and ray-march bricks all read efficiently. Avoid full-z-column chunks — they punish horizontal slicing.
-- **Sharding:** Zarr v3 sharding packs many chunks per file to avoid tiny-file blowup over the web.
-- **Multiresolution pyramid:** stored under `_pyramid/<level>/` as **2× downsampled** levels (mean/anti-aliased), each its own array, following the **OME-Zarr multiscales** metadata pattern so standard tooling reads it. Viewer (doc 06) picks LOD by camera distance / available bandwidth; octree LOD streaming (OVERVIEW §5) reads these levels. **Uncertainty arrays get a parallel pyramid** (variance-correct downsampling, not mean) so confidence survives LOD.
+- **Chunking:** **isotropic cubic chunks, default `64³`** (~1 MiB at f4) so arbitrary slice planes (XY/XZ/YZ) and ray-march bricks all read efficiently. Never full-z-column chunks. (Doc 04 may tune the exact size but not the cubic shape.)
+- **Sharding:** Zarr v3 sharding packs many chunks per shard file to avoid tiny-object blowup over HTTP.
+- **Multiresolution:** levels live as numbered members **`<property>/0,1,2,…`** (`0` = full res; each level halves z,y,x), described by an **OME-Zarr `multiscales`** block in the property subgroup so standard tooling reads it. Value arrays downsample by **mean/anti-alias**; **`_sigma` arrays downsample variance-correct** (so confidence survives LOD); categorical arrays downsample by **mode** (labels) or **mean-then-renormalize** (probabilities).
+- **Compression:** Blosc(zstd, shuffle), lossless. **⚠️ Browser decode is an early-validation spike (critique #5/#17):** confirm JS Zarr v3 + Blosc/zstd decode maturity in M0/M1 before committing the frontend; if not ready, the fallback is server-side decode-to-raw on the brick endpoint (doc 04) with the *same* chunk addressing — so this risk does not change the layout, only who decodes.
 
 ### 10.4 2D & vector conventions
 
