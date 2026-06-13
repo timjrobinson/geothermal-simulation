@@ -27,11 +27,29 @@ import {
   addLayerBottom as addLayerBottomOp,
   makeVolumeLayer,
   makeTerrainLayer,
+  makeFeatureLayer,
+  makeWellLayer,
+  makePointCloudLayer,
+  makeRasterLayer,
   tfFromMeta,
+  type PointCloud,
+  type RasterTimeSeries,
 } from "./lib/layers";
+import type { WellTrajectory } from "./lib/wells";
+import {
+  type TimeAxis,
+  type TimeWindowMode,
+  type TimeWindowMs,
+  buildTimeAxis,
+  resolveWindowMs,
+  nearestEpochIndex,
+  fractionToMs,
+  playheadFraction,
+} from "./lib/time";
 import type { SurfaceGrid, XYExtent } from "./lib/terrain";
 import type { FusedModelOut, FusedSampleOut } from "./lib/fusion";
 import { selectionToVolume, type VoxelReadout } from "./lib/brushing";
+import type { WellReadout } from "./lib/wells";
 
 // Re-export so existing importers (and tests) keep resolving these from the store.
 export { tfFromMeta };
@@ -50,6 +68,14 @@ export interface Capabilities {
 }
 
 export type SliceAxis = "x" | "y" | "z";
+
+// A well-tube hover readout (doc 06 §5.3): the nearest-station true depths plus the well
+// identity so panels/tooltips can sync. Extends the pure WellReadout with provenance.
+export interface WellHoverReadout extends WellReadout {
+  wellId: string | null;
+  featureId: string;
+  layerId: string;
+}
 
 export interface ClipBox {
   // Fractions [0,1] of the active AABB along each axis (X, Y, Z). Render-only (doc 06 §2.4).
@@ -98,6 +124,25 @@ interface ViewerState extends LayerCollection {
   selection: number[]; // local sample-row indices (brushing key)
   pickedVoxel: VoxelReadout | null;
 
+  // ── well hover readout (doc 06 §5.3) — the MD/TVD/elevation of the last-hovered well tube
+  // station + which well it belongs to, so a tooltip + the log-track panel sync to it. Null
+  // when the pointer is off any well. Depths are TRUE (not vertically-exaggerated, doc 06 §2.3).
+  wellReadout: WellHoverReadout | null;
+
+  // ── global 4-D time slider (doc 06 §9.4) ──────────────────────────────────────────
+  // The time axis is the UNION of every time-bearing layer's epochs (microseismic, InSAR,
+  // repeat surveys). The playhead is a single instant (ms); `timeWindowMode` expands it to
+  // the inclusive [t0,t1] each layer filters against (instant / cumulative / rolling). The
+  // window drives uniforms (microseismic uTimeWindow, InSAR frame select) — NO per-tick
+  // geometry rebuild. `timePlaying`/`timeSpeed` drive the play loop (the Scene advances the
+  // playhead each frame). `timeRollingWidthMs` is the rolling-window span.
+  timeAxis: TimeAxis;
+  timePlayheadMs: number;
+  timeWindowMode: TimeWindowMode;
+  timeRollingWidthMs: number;
+  timePlaying: boolean;
+  timeSpeed: number; // axis-ms advanced per real second when playing
+
   // ── derived: union AABB across visible volume layers (camera framing / clip basis) ──
   sceneAABB: AABB | null;
 
@@ -139,6 +184,45 @@ interface ViewerState extends LayerCollection {
   // Pass null to remove the binding (layer renders unmodulated).
   setLayerConfidence: (id: string, conf: ConfidenceModulation | null) => void;
 
+  // feature + 4-D layer adders (doc 06 §5, §9.4). Each appends a layer and (optionally)
+  // contributes its epochs to the global time axis.
+  addFeatureLayer: (opts: {
+    featureId: string;
+    featureKind: string;
+    id?: string;
+    name?: string;
+    datasetId?: string;
+    select?: boolean;
+  }) => string;
+  addWellLayer: (
+    trajectory: WellTrajectory,
+    opts?: { id?: string; name?: string; datasetId?: string; logProperty?: string | null; select?: boolean },
+  ) => string;
+  addPointCloudLayer: (
+    cloud: PointCloud,
+    opts: { featureId: string; epochs?: string[]; id?: string; name?: string; datasetId?: string; select?: boolean },
+  ) => string;
+  addRasterLayer: (
+    raster: RasterTimeSeries,
+    opts?: { featureId?: string; id?: string; name?: string; datasetId?: string; select?: boolean },
+  ) => string;
+  setLayerLogProperty: (id: string, property: string | null) => void;
+
+  // time-slider actions (doc 06 §9.4). `setTimeAxis` replaces the axis (e.g. from
+  // GET /projects/{pid}/time-extent); `mergeTimeEpochs` unions in a newly-added layer's
+  // epochs. The playhead is set in ms or as a [0,1] fraction (slider scrub).
+  setTimeAxis: (epochLists: string[][]) => void;
+  mergeTimeEpochs: (epochs: string[]) => void;
+  setTimePlayhead: (ms: number) => void;
+  setTimePlayheadFraction: (fraction: number) => void;
+  setTimeWindowMode: (mode: TimeWindowMode) => void;
+  setTimeRollingWidthMs: (ms: number) => void;
+  setTimePlaying: (playing: boolean) => void;
+  setTimeSpeed: (speed: number) => void;
+  // Advance the playhead by `dtMs` of axis time (the play loop tick); wraps to the axis
+  // start at the end. Also re-snaps each raster layer's frameIndex to the new playhead.
+  tickTime: (dtMs: number) => void;
+
   setSteps: (n: number) => void;
   setVerticalExaggeration: (v: number) => void;
   setClip: (patch: Partial<ClipBox>) => void;
@@ -156,6 +240,7 @@ interface ViewerState extends LayerCollection {
   setSelection: (rows: number[]) => void;
   clearSelection: () => void;
   setPickedVoxel: (v: VoxelReadout | null) => void;
+  setWellReadout: (r: WellHoverReadout | null) => void;
 }
 
 // Recompute the union AABB over all visible volume layers (doc 06 §2.2 framing basis).
@@ -181,6 +266,29 @@ export function unionAABB(
     }
   }
   return min && max ? { min, max } : null;
+}
+
+// Re-snap every raster (InSAR) layer's `frameIndex` to the nearest axis epoch for the new
+// playhead (doc 06 §9.4 frame select). Returns a fresh `layers` map only when something
+// changed, so unrelated layers keep their identity (no spurious re-renders).
+function snapRasters(
+  layers: Record<string, Layer>,
+  order: string[],
+  playheadMs: number,
+): { layers: Record<string, Layer> } | Record<string, never> {
+  let next: Record<string, Layer> | null = null;
+  for (const id of order) {
+    const l = layers[id];
+    if (!l || l.kind !== "raster" || !l.raster) continue;
+    const idx = nearestEpochIndex(
+      { epochs: l.raster.epochs, epochMs: l.raster.epochMs, t0Ms: null, t1Ms: null },
+      playheadMs,
+    );
+    if (idx < 0 || idx === l.raster.frameIndex) continue;
+    next ??= { ...layers };
+    next[id] = { ...l, raster: { ...l.raster, frameIndex: idx } };
+  }
+  return next ? { layers: next } : {};
 }
 
 // Recompute the derived sceneAABB after any layer mutation.
@@ -212,11 +320,19 @@ export const useViewer = create<ViewerState>((set, get) => ({
   capabilities: null,
   sceneAABB: null,
 
+  timeAxis: buildTimeAxis(),
+  timePlayheadMs: 0,
+  timeWindowMode: "cumulative",
+  timeRollingWidthMs: 0,
+  timePlaying: false,
+  timeSpeed: 0,
+
   analysisOpen: false,
   fusedGrid: null,
   fusedSample: null,
   selection: [],
   pickedVoxel: null,
+  wellReadout: null,
 
   setLoading: (loading) => set({ loading }),
   setError: (error) => set({ error }),
@@ -263,6 +379,116 @@ export const useViewer = create<ViewerState>((set, get) => ({
       loading: false,
     });
     return layer.id;
+  },
+
+  addFeatureLayer: (opts) => {
+    const layer = makeFeatureLayer(opts);
+    const next = addLayerOp(
+      { layers: get().layers, layerOrder: get().layerOrder },
+      layer,
+    );
+    set({
+      ...withScene(next),
+      ...(opts.select === false ? {} : { selectedLayerId: layer.id }),
+      loading: false,
+    });
+    return layer.id;
+  },
+
+  addWellLayer: (trajectory, opts = {}) => {
+    const layer = makeWellLayer(trajectory, opts);
+    const next = addLayerOp(
+      { layers: get().layers, layerOrder: get().layerOrder },
+      layer,
+    );
+    set({
+      ...withScene(next),
+      ...(opts.select === false ? {} : { selectedLayerId: layer.id }),
+      loading: false,
+    });
+    return layer.id;
+  },
+
+  addPointCloudLayer: (cloud, opts) => {
+    const layer = makePointCloudLayer(cloud, opts);
+    const next = addLayerOp(
+      { layers: get().layers, layerOrder: get().layerOrder },
+      layer,
+    );
+    set({
+      ...withScene(next),
+      ...(opts.select === false ? {} : { selectedLayerId: layer.id }),
+      loading: false,
+    });
+    if (opts.epochs && opts.epochs.length) get().mergeTimeEpochs(opts.epochs);
+    return layer.id;
+  },
+
+  addRasterLayer: (raster, opts = {}) => {
+    const layer = makeRasterLayer(raster, opts);
+    const next = addLayerOp(
+      { layers: get().layers, layerOrder: get().layerOrder },
+      layer,
+    );
+    set({
+      ...withScene(next),
+      ...(opts.select === false ? {} : { selectedLayerId: layer.id }),
+      loading: false,
+    });
+    if (raster.epochs.length) get().mergeTimeEpochs(raster.epochs);
+    return layer.id;
+  },
+
+  setLayerLogProperty: (id, logProperty) =>
+    set(
+      patchLayerOp({ layers: get().layers, layerOrder: get().layerOrder }, id, {
+        logProperty,
+      }),
+    ),
+
+  setTimeAxis: (epochLists) => {
+    const axis = buildTimeAxis(...epochLists);
+    set({
+      timeAxis: axis,
+      timePlayheadMs: axis.t1Ms ?? 0,
+      ...snapRasters(get().layers, get().layerOrder, axis.t1Ms ?? 0),
+    });
+  },
+
+  mergeTimeEpochs: (epochs) => {
+    const axis = buildTimeAxis(get().timeAxis.epochs, epochs);
+    // Keep the playhead where it is unless the axis was previously empty (then jump to end).
+    const ph = get().timeAxis.t1Ms == null ? (axis.t1Ms ?? 0) : get().timePlayheadMs;
+    set({
+      timeAxis: axis,
+      timePlayheadMs: ph,
+      ...snapRasters(get().layers, get().layerOrder, ph),
+    });
+  },
+
+  setTimePlayhead: (ms) =>
+    set({
+      timePlayheadMs: ms,
+      ...snapRasters(get().layers, get().layerOrder, ms),
+    }),
+
+  setTimePlayheadFraction: (fraction) => {
+    const ms = fractionToMs(get().timeAxis, fraction);
+    set({ timePlayheadMs: ms, ...snapRasters(get().layers, get().layerOrder, ms) });
+  },
+
+  setTimeWindowMode: (timeWindowMode) => set({ timeWindowMode }),
+  setTimeRollingWidthMs: (timeRollingWidthMs) => set({ timeRollingWidthMs }),
+  setTimePlaying: (timePlaying) => set({ timePlaying }),
+  setTimeSpeed: (timeSpeed) => set({ timeSpeed }),
+
+  tickTime: (dtMs) => {
+    const { timeAxis, timePlayheadMs } = get();
+    if (timeAxis.t0Ms == null || timeAxis.t1Ms == null) return;
+    let ms = timePlayheadMs + dtMs;
+    if (ms > timeAxis.t1Ms) ms = timeAxis.t0Ms; // loop
+    if (ms < timeAxis.t0Ms) ms = timeAxis.t0Ms;
+    set({ timePlayheadMs: ms, ...snapRasters(get().layers, get().layerOrder, ms) });
   },
 
   removeLayer: (id) => {
@@ -406,11 +632,28 @@ export const useViewer = create<ViewerState>((set, get) => ({
   },
 
   setPickedVoxel: (pickedVoxel) => set({ pickedVoxel }),
+  setWellReadout: (wellReadout) => set({ wellReadout }),
 }));
 
 // Convenience selectors (avoid re-deriving in components).
 export function selectedLayer(s: ViewerState): Layer | null {
   return s.selectedLayerId ? (s.layers[s.selectedLayerId] ?? null) : null;
+}
+
+// The resolved active time window in epoch-ms (doc 06 §9.4) — what the microseismic cloud's
+// uTimeWindow uniform and any CPU parity check consume. Derived from the playhead + mode.
+export function currentTimeWindow(s: ViewerState): TimeWindowMs {
+  return resolveWindowMs(
+    s.timeWindowMode,
+    s.timePlayheadMs,
+    s.timeAxis.t0Ms,
+    s.timeRollingWidthMs,
+  );
+}
+
+// Playhead position as a [0,1] fraction along the axis (slider rendering).
+export function timePlayheadFraction(s: ViewerState): number {
+  return playheadFraction(s.timeAxis, s.timePlayheadMs);
 }
 
 export { engineeringAABB, aabbCenter, aabbSize };

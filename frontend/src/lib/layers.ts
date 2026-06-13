@@ -23,6 +23,7 @@ import {
   buildSurfaceGrid,
   elevationRange,
 } from "./terrain";
+import type { WellTrajectory } from "./wells";
 
 // Compositing / blend operators (doc 06 §3.3). M1 default is `over` (alpha-composite by
 // layer order); `additive` / `mip` / `minip` are selectable per layer.
@@ -80,6 +81,57 @@ export interface Layer {
   surface?: SurfaceGrid;
   surfaceModel?: SurfaceModel;
   basemap?: boolean;
+
+  // ── M2/M4/M5 feature + 4-D layer kinds (doc 06 §5, §9.4) ─────────────────────────────
+  featureId?: string; // the source GeologicalFeature id (provenance / refetch key)
+  featureKind?: string; // "horizon" | "fault" | "solid" | "wellPath" | "pointCloud" | …
+
+  // `surface`/`fault`/`isosurface` layers (doc 06 §5.2): a glTF triangle mesh loaded via
+  // three GLTFLoader from GET /features/{id}/geometry, dropped into the Z-up scene. Faults
+  // render semi-transparent with an edge highlight; surfaces double-sided with optional
+  // per-vertex property draping. The decoded mesh is held by the scene component (THREE
+  // objects never live in the store); the layer carries only the load descriptor + style.
+  faultStyle?: boolean; // semi-transparent + edge highlight (doc 06 §5.2)
+
+  // `well` layers (doc 06 §5.3): the resolved trajectory (Engineering polyline + MD/TVD +
+  // joined LAS logs) the WellLayer turns into a TubeGeometry, plus which log curve colours
+  // the tube (null = a neutral solid tube).
+  trajectory?: WellTrajectory;
+  logProperty?: string | null; // selected LAS curve name (tube colour)
+
+  // `points` layers (microseismic 4-D cloud, doc 06 §5.4): the compact parallel arrays the
+  // PointCloudLayer uploads once to a THREE.Points buffer; the time window culls on the GPU
+  // via per-point epoch-ms (no per-frame re-upload).
+  points?: PointCloud;
+
+  // `raster` layers (InSAR deformation time-series, doc 06 §6): a stack of per-epoch surface
+  // grids draped on the ground; the global time slider selects the leading-t frame.
+  raster?: RasterTimeSeries;
+}
+
+// A microseismic 4-D point cloud ready for GPU upload (doc 06 §5.4). `epochMs` is the parsed
+// epoch-millisecond per point (parallel to xyz) so the moving time window culls on the GPU
+// without re-parsing ISO strings each frame.
+export interface PointCloud {
+  count: number;
+  positions: Float32Array; // length 3*count, Engineering XYZ (flat x,y,z per point)
+  magnitude: Float32Array; // length count
+  // Parsed epoch ms (NaN for an undated point). Float64 because ms-since-epoch (~1.6e12)
+  // overflows float32 precision; the scene rebases it to a relative float32 at GPU upload so
+  // the moving time window's `uTimeWindow` comparison stays exact (doc 06 §5.4, §9.4).
+  epochMs: Float64Array;
+  depth?: Float32Array; // length count, true depth (m) when present
+}
+
+// A draped raster time-series frame (InSAR deformation, doc 06 §6). Each frame is a value
+// grid co-registered with `surface` (same nx/ny); the slider selects `frameIndex`.
+export interface RasterTimeSeries {
+  surface: SurfaceGrid; // the draped ground grid (xy + elevation)
+  frames: Float32Array[]; // per-epoch value grids (length nx*ny each)
+  epochs: string[]; // ISO-8601 per frame (parallel to frames)
+  epochMs: number[]; // parsed ms per frame
+  range: [number, number]; // value colour domain
+  frameIndex: number; // currently selected frame (slider-driven)
 }
 
 // Confidence-modulated-opacity binding (doc 07 §5.3 honest view; doc 06 §9.2). `volume` is a
@@ -221,6 +273,142 @@ export function makeTerrainLayer(
     basemap: opts.basemap ?? false,
     aabb,
   };
+}
+
+// Build a `surface`/`fault`/`isosurface` feature Layer (doc 06 §5.2). The glTF mesh is loaded
+// by the scene FeatureLayer from GET /features/{featureId}/geometry; this carries only the
+// descriptor + style. Faults default to the semi-transparent edge-highlight style.
+export function makeFeatureLayer(opts: {
+  featureId: string;
+  featureKind: string;
+  id?: string;
+  name?: string;
+  datasetId?: string;
+}): Layer {
+  const isFault = opts.featureKind === "fault";
+  const kind: LayerKind =
+    opts.featureKind === "isosurface" ? "isosurface" : "surface";
+  return {
+    id: opts.id ?? newLayerId("feature"),
+    datasetId: opts.datasetId ?? opts.featureId,
+    name: opts.name ?? opts.featureKind,
+    kind,
+    visible: true,
+    opacity: isFault ? 0.6 : 1,
+    order: 0,
+    blend: "over",
+    transferFn: { ...DEFAULT_TF },
+    clip: true,
+    featureId: opts.featureId,
+    featureKind: opts.featureKind,
+    faultStyle: isFault,
+  };
+}
+
+// Build a `well` Layer from a resolved trajectory (doc 06 §5.3). `logProperty` selects the
+// LAS curve that colours the tube (defaults to the joined logs' primary property).
+export function makeWellLayer(
+  trajectory: WellTrajectory,
+  opts: { id?: string; name?: string; datasetId?: string; logProperty?: string | null } = {},
+): Layer {
+  const aabb = polylineAABB(trajectory.polyline);
+  const logProperty =
+    opts.logProperty !== undefined
+      ? opts.logProperty
+      : (trajectory.logs?.primaryProperty ?? null);
+  return {
+    id: opts.id ?? newLayerId("well"),
+    datasetId: opts.datasetId ?? trajectory.featureId,
+    name: opts.name ?? (trajectory.wellId ? `Well ${trajectory.wellId}` : "Well"),
+    kind: "well",
+    visible: true,
+    opacity: 1,
+    order: 0,
+    blend: "over",
+    transferFn: { ...DEFAULT_TF },
+    clip: true,
+    featureId: trajectory.featureId,
+    featureKind: "wellPath",
+    trajectory,
+    logProperty,
+    aabb,
+  };
+}
+
+// Build a `points` microseismic-cloud Layer (doc 06 §5.4) from the uploaded buffers.
+export function makePointCloudLayer(
+  cloud: PointCloud,
+  opts: { featureId: string; id?: string; name?: string; datasetId?: string } = { featureId: "" },
+): Layer {
+  return {
+    id: opts.id ?? newLayerId("points"),
+    datasetId: opts.datasetId ?? opts.featureId,
+    name: opts.name ?? "Microseismic",
+    kind: "points",
+    visible: true,
+    opacity: 1,
+    order: 0,
+    blend: "over",
+    transferFn: { ...DEFAULT_TF, colormap: "inferno" },
+    clip: true,
+    featureId: opts.featureId,
+    featureKind: "pointCloud",
+    points: cloud,
+    aabb: pointsAABB(cloud),
+  };
+}
+
+// Build a `raster` InSAR deformation time-series Layer (doc 06 §6). The slider drives
+// `frameIndex` (leading-t frame select).
+export function makeRasterLayer(
+  raster: RasterTimeSeries,
+  opts: { featureId?: string; id?: string; name?: string; datasetId?: string } = {},
+): Layer {
+  return {
+    id: opts.id ?? newLayerId("raster"),
+    datasetId: opts.datasetId ?? opts.featureId ?? "raster",
+    name: opts.name ?? "InSAR deformation",
+    kind: "raster",
+    visible: true,
+    opacity: 1,
+    order: 0,
+    blend: "over",
+    transferFn: { ...DEFAULT_TF, colormap: "turbo", domainMin: raster.range[0], domainMax: raster.range[1] },
+    clip: true,
+    featureId: opts.featureId,
+    featureKind: "deformation",
+    raster,
+  };
+}
+
+// Engineering AABB of a polyline (well-tube framing). Returns undefined for an empty path.
+function polylineAABB(poly: readonly [number, number, number][]): AABB | undefined {
+  if (poly.length === 0) return undefined;
+  const min: [number, number, number] = [...poly[0]];
+  const max: [number, number, number] = [...poly[0]];
+  for (const p of poly) {
+    for (let k = 0; k < 3; k++) {
+      if (p[k] < min[k]) min[k] = p[k];
+      if (p[k] > max[k]) max[k] = p[k];
+    }
+  }
+  return { min, max };
+}
+
+// Engineering AABB of a point cloud (cloud framing). Returns undefined when empty.
+function pointsAABB(cloud: PointCloud): AABB | undefined {
+  if (cloud.count === 0) return undefined;
+  const p = cloud.positions;
+  const min: [number, number, number] = [p[0], p[1], p[2]];
+  const max: [number, number, number] = [p[0], p[1], p[2]];
+  for (let i = 0; i < cloud.count; i++) {
+    for (let k = 0; k < 3; k++) {
+      const v = p[i * 3 + k];
+      if (v < min[k]) min[k] = v;
+      if (v > max[k]) max[k] = v;
+    }
+  }
+  return { min, max };
 }
 
 // ── Pure layer-list operations (operate on {layers, layerOrder}) ─────────────────────

@@ -44,6 +44,7 @@ from geosim.jobs import InlineJobRunner, JobRunner, JobState, ProgressReporter
 from geosim.plugins import get_registry
 from geosim.storage import ensure_project_layout
 
+from .features import build_feature_router
 from .frame_io import frame_from_dict, frame_from_row, frame_row_kwargs, frame_to_dict
 from .fusion import build_fusion_router
 from .property_models import build_property_model_router
@@ -220,6 +221,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # Fusion surface: fused-grid create/resample/get + artifact discovery (doc 07 §6,
     # doc 04 §7/§9.2). Shares the same catalog session + storage_root DI off app.state.
     app.include_router(build_fusion_router(session_dep))
+
+    # Feature serving + 4D backend: feature list/detail/geometry (glTF surfaces, GeoJSON
+    # lines), microseismic time-filtered point clouds, well trajectories, and the global
+    # time-extent union (doc 04 §9.2, doc 02 §5/§8, doc 06 §5.3/§5.4/§9.4).
+    app.include_router(build_feature_router(session_dep))
 
     # ──────────────────────────────── capabilities (doc 08 §7.1) ────────────────────────────
     @app.get("/api/capabilities")

@@ -14,6 +14,7 @@ Three responsibilities, all per the design contract:
   byte-level de-dup — :mod:`.raw_store`.
 """
 
+from .gltf import GLTF_TRIANGLES, triangulate_grid, write_glb
 from .layout import BULK_STORES, CACHE_SUBDIRS, ProjectLayout, ensure_project_layout
 from .property_model import (
     DEFAULT_CHUNK,
@@ -35,6 +36,8 @@ from .raw_store import RawRef, RawStore, sha256_bytes
 __all__ = [
     # layout
     "BULK_STORES", "CACHE_SUBDIRS", "ProjectLayout", "ensure_project_layout",
+    # gltf surface writer (doc 06 §5.3)
+    "write_glb", "triangulate_grid", "GLTF_TRIANGLES",
     # property model (zarr v3)
     "DEFAULT_CHUNK", "SIGMA_SUFFIX", "GridSpec", "PropertyModelReader",
     "write_property_model", "open_property_model",

@@ -27,6 +27,9 @@ export interface TransferFnSpec {
   bandEnabled?: boolean;
   bandMin?: number; // normalized t in [0,1]
   bandMax?: number; // normalized t in [0,1]
+  // Point-cloud colour-by mode (doc 06 §5.4): which per-point scalar the LUT maps. Only the
+  // microseismic PointCloudLayer reads this; volume/surface layers ignore it.
+  colorBy?: "time" | "depth" | "magnitude";
 }
 
 export const LUT_SIZE = 256;

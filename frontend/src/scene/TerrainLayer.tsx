@@ -20,7 +20,8 @@ import * as THREE from "three";
 import { useViewer } from "../store";
 import type { Layer } from "../lib/layers";
 import { gridToMesh, type SurfaceGrid } from "../lib/terrain";
-import { aabbSize, type AABB } from "../lib/volume";
+import { type AABB } from "../lib/volume";
+import { clipPlanesFor } from "./clipPlanes";
 
 // Build a THREE.BufferGeometry from a SurfaceGrid (vertex/Z math lives in lib/terrain.ts —
 // pure + unit-tested). vex=1 here: vertical exaggeration is applied as a mesh scale below
@@ -33,38 +34,6 @@ function buildGeometry(grid: SurfaceGrid): THREE.BufferGeometry {
   g.setIndex(new THREE.BufferAttribute(indices, 1));
   g.computeVertexNormals(); // shaded-relief lighting (doc 06 §6.2)
   return g;
-}
-
-// Map the global clip-box fractions (relative to the scene AABB) to Engineering-metre
-// THREE.Plane[] that carve the terrain mesh. Mirrors the volume layer's clip basis so a
-// single box cuts terrain + subsurface together (doc 06 §2.4 "cut a box that slices terrain
-// + subsurface"). Planes are in the mesh's parent (world/Engineering) space; the mesh Z
-// scale (vex) is applied to the geometry vertices, so the clip Z bound is scaled to match.
-function clipPlanes(
-  basis: AABB,
-  clip: { min: [number, number, number]; max: [number, number, number] },
-  vex: number,
-): THREE.Plane[] {
-  const s = aabbSize(basis);
-  const lo: [number, number, number] = [
-    basis.min[0] + clip.min[0] * s[0],
-    basis.min[1] + clip.min[1] * s[1],
-    (basis.min[2] + clip.min[2] * s[2]) * vex,
-  ];
-  const hi: [number, number, number] = [
-    basis.min[0] + clip.max[0] * s[0],
-    basis.min[1] + clip.max[1] * s[1],
-    (basis.min[2] + clip.max[2] * s[2]) * vex,
-  ];
-  // Each THREE.Plane keeps the half-space on its +normal side: normal points INTO the box.
-  return [
-    new THREE.Plane(new THREE.Vector3(1, 0, 0), -lo[0]),
-    new THREE.Plane(new THREE.Vector3(-1, 0, 0), hi[0]),
-    new THREE.Plane(new THREE.Vector3(0, 1, 0), -lo[1]),
-    new THREE.Plane(new THREE.Vector3(0, -1, 0), hi[1]),
-    new THREE.Plane(new THREE.Vector3(0, 0, 1), -lo[2]),
-    new THREE.Plane(new THREE.Vector3(0, 0, -1), hi[2]),
-  ];
 }
 
 export function TerrainLayer({ layer }: { layer: Layer }) {
@@ -81,7 +50,7 @@ export function TerrainLayer({ layer }: { layer: Layer }) {
   // the terrain is carved by the very same box. Falls back to the terrain's own AABB.
   const basis: AABB | null = sceneAABB ?? layer.aabb ?? null;
   const planes = useMemo(
-    () => (layer.clip && basis ? clipPlanes(basis, clip, vex) : []),
+    () => (layer.clip && basis ? clipPlanesFor(basis, clip, vex) : []),
     [layer.clip, basis, clip, vex],
   );
 

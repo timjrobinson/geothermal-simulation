@@ -5,7 +5,7 @@
 // (doc 06 §2.1) — no CRS ever reaches the GPU, float32-safe via the floating origin.
 
 import { useEffect, useRef } from "react";
-import { Canvas, useThree } from "@react-three/fiber";
+import { Canvas, useThree, useFrame } from "@react-three/fiber";
 import { CameraControls } from "@react-three/drei";
 import * as THREE from "three";
 import { useViewer } from "../store";
@@ -13,6 +13,10 @@ import { VolumeLayers } from "./VolumeLayer";
 import { TerrainLayers } from "./TerrainLayer";
 import { SliceLayer } from "./SliceLayer";
 import { ClipBox } from "./ClipBox";
+import { FeatureLayers } from "./FeatureLayer";
+import { WellLayers } from "./WellLayer";
+import { PointCloudLayers } from "./PointCloudLayer";
+import { RasterLayers } from "./RasterLayer";
 import { aabbCenter, aabbSize } from "../lib/volume";
 
 // One-time Z-up: ENU Z is up (doc 06 §2.1). Set before any Object3D is created.
@@ -42,6 +46,21 @@ function CameraFramer() {
   return null;
 }
 
+// The global time-slider play loop (doc 06 §9.4). When playing, advances the store playhead
+// by `timeSpeed` axis-ms per real second each frame; the playhead drives the microseismic
+// uTimeWindow + InSAR frame select uniforms — NO per-tick geometry rebuild. Runs inside the
+// Canvas so it shares the render clock.
+function TimePlayer() {
+  const playing = useViewer((s) => s.timePlaying);
+  const speed = useViewer((s) => s.timeSpeed);
+  const tickTime = useViewer((s) => s.tickTime);
+  useFrame((_, delta) => {
+    if (!playing || speed <= 0) return;
+    tickTime(delta * speed);
+  });
+  return null;
+}
+
 export function Scene() {
   return (
     <Canvas
@@ -59,13 +78,18 @@ export function Scene() {
       <ambientLight intensity={0.25} />
 
       <TerrainLayers />
+      <RasterLayers />
       <SliceLayer />
       <VolumeLayers />
+      <FeatureLayers />
+      <WellLayers />
+      <PointCloudLayers />
       <ClipBox />
 
       <axesHelper args={[1000]} />
       <CameraControls makeDefault />
       <CameraFramer />
+      <TimePlayer />
     </Canvas>
   );
 }

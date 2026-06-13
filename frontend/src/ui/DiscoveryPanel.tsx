@@ -15,6 +15,14 @@ import {
   type ProjectSummary,
   type PropertyModelArtifact,
 } from "../lib/api";
+import {
+  fetchProjectFeatures,
+  fetchFeaturePoints,
+  fetchWellTrajectory,
+  fetchTimeExtent,
+  packPointCloud,
+  type FeatureSummary,
+} from "../lib/features";
 import { makeMockVolume } from "../lib/mockVolume";
 
 const btn: React.CSSProperties = {
@@ -29,10 +37,15 @@ const btn: React.CSSProperties = {
 
 export function DiscoveryPanel({ onClose }: { onClose: () => void }) {
   const addVolumeLayer = useViewer((s) => s.addVolumeLayer);
+  const addFeatureLayer = useViewer((s) => s.addFeatureLayer);
+  const addWellLayer = useViewer((s) => s.addWellLayer);
+  const addPointCloudLayer = useViewer((s) => s.addPointCloudLayer);
+  const setTimeAxis = useViewer((s) => s.setTimeAxis);
   const setError = useViewer((s) => s.setError);
 
   const [projects, setProjects] = useState<ProjectSummary[] | null>(null);
   const [artifacts, setArtifacts] = useState<PropertyModelArtifact[]>([]);
+  const [features, setFeatures] = useState<FeatureSummary[]>([]);
   const [activePid, setActivePid] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [note, setNote] = useState<string>("");
@@ -59,10 +72,49 @@ export function DiscoveryPanel({ onClose }: { onClose: () => void }) {
     try {
       const arts = await fetchProjectArtifacts(pid);
       setArtifacts(arts);
-      if (arts.length === 0) setNote("no property models in this project");
+      // Features (surfaces/faults/wells/microseismic) + the global time axis (doc 06 §9.4).
+      const feats = await fetchProjectFeatures(pid).catch(() => []);
+      setFeatures(feats);
+      const ext = await fetchTimeExtent(pid).catch(() => null);
+      if (ext && ext.epochs.length) setTimeAxis([ext.epochs]);
+      if (arts.length === 0 && feats.length === 0)
+        setNote("no property models or features in this project");
     } catch {
       setArtifacts([]);
+      setFeatures([]);
       setNote("could not list artifacts");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  // Add a feature as the right layer kind: glTF surface/fault -> FeatureLayer, well path ->
+  // WellLayer (resolved trajectory + logs), microseismic cloud -> PointCloudLayer (doc 06 §5).
+  const addFeature = async (f: FeatureSummary) => {
+    setBusy(true);
+    setNote("");
+    try {
+      if (f.featureKind === "wellPath") {
+        const traj = await fetchWellTrajectory(f.id);
+        addWellLayer(traj, { name: traj.wellId ? `Well ${traj.wellId}` : f.id });
+      } else if (f.geometryEndpoint === "points") {
+        const resp = await fetchFeaturePoints(f.id);
+        addPointCloudLayer(packPointCloud(resp), {
+          featureId: f.id,
+          epochs: resp.t,
+          name: `Microseismic (${resp.count})`,
+        });
+      } else if (f.geometryEndpoint === "gltf") {
+        addFeatureLayer({
+          featureId: f.id,
+          featureKind: f.featureKind,
+          name: f.featureKind,
+        });
+      } else {
+        setNote(`${f.featureKind}: geojson line layer not yet rendered`);
+      }
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
     } finally {
       setBusy(false);
     }
@@ -145,6 +197,28 @@ export function DiscoveryPanel({ onClose }: { onClose: () => void }) {
                 {a.canonicalUnit ? ` (${a.canonicalUnit})` : ""}
               </span>
               <button style={btn} onClick={() => addArtifact(a)} disabled={busy}>
+                + add
+              </button>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {activePid && features.length > 0 && (
+        <div style={{ marginTop: 8 }}>
+          <div style={{ fontSize: 11, opacity: 0.6, marginBottom: 4 }}>
+            Features &amp; 4-D
+          </div>
+          {features.map((f) => (
+            <div
+              key={f.id}
+              style={{ display: "flex", justifyContent: "space-between", marginBottom: 3 }}
+            >
+              <span style={{ fontSize: 12 }}>
+                {f.featureKind}
+                {f.hasTime ? " ⏱" : ""}
+              </span>
+              <button style={btn} onClick={() => addFeature(f)} disabled={busy}>
                 + add
               </button>
             </div>

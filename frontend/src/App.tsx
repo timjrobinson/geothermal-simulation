@@ -18,6 +18,8 @@ import { Scene } from "./scene/Scene";
 import { ControlPanel } from "./ui/ControlPanel";
 import { AnalysisPanel } from "./ui/AnalysisPanel";
 import { FavorabilityPanel } from "./ui/FavorabilityPanel";
+import { TimeSlider } from "./ui/TimeSlider";
+import { LogTrackPanel } from "./ui/LogTrackPanel";
 
 export function App() {
   const loadData = useViewer((s) => s.loadData);
@@ -105,6 +107,8 @@ export function App() {
     <div style={{ position: "absolute", inset: 0, overflow: "hidden" }}>
       <Scene />
       <ControlPanel />
+      <TimeSlider />
+      <LogTrackPanel />
       {analysisOpen ? (
         <AnalysisPanel />
       ) : (
