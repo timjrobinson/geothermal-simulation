@@ -47,6 +47,7 @@ from geosim.storage import ensure_project_layout
 from .features import build_feature_router
 from .frame_io import frame_from_dict, frame_from_row, frame_row_kwargs, frame_to_dict
 from .fusion import build_fusion_router
+from .geomodel import build_geomodel_router
 from .inversion import build_inversion_router
 from .planning import build_planning_router
 from .property_models import build_property_model_router
@@ -239,6 +240,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # fused resample) and GET /inversion-engines lists the registered engine palette.
     # Progress/cancel reuse the doc-04 job endpoints unchanged (doc 08 §4f).
     app.include_router(build_inversion_router(session_dep))
+
+    # Implicit geomodel surface (OVERVIEW §6 L4 / doc 07, M8): POST /projects/{pid}/geomodel
+    # builds a GemPy implicit model from horizon/fault contacts + well tops over the project
+    # SpatialFrame ROI×depthRange, then catalogs a categorical lithology_class PropertyModel
+    # (doc 02 §10.2) + one unitSolid feature per unit (doc 02 §5). Sits beside M7, not on its
+    # critical path. Shares the catalog session + storage_root DI off app.state (doc 04 §9).
+    app.include_router(build_geomodel_router(session_dep))
 
     # ──────────────────────────────── capabilities (doc 08 §7.1) ────────────────────────────
     @app.get("/api/capabilities")
