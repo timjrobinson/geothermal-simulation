@@ -21,6 +21,8 @@ node_modules/
 dist/
 .vite/
 *.local
+*.tsbuildinfo
+.test-out/
 
 # Data stores (project bulk stores; never committed)
 storage_root/

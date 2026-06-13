@@ -21,6 +21,11 @@ __all__ = [
     "JobOut",
     "DemoJobRequest",
     "EnqueueResponse",
+    "PropertyModelStats",
+    "PropertyModelMeta",
+    "VolumeMeta",
+    "SliceRequest",
+    "SliceHeader",
 ]
 
 
@@ -83,3 +88,93 @@ class EnqueueResponse(BaseModel):
     """The ``{job_id}`` an async endpoint returns immediately (doc 04 §9.4 job pattern)."""
 
     job_id: str
+
+
+# ─────────────────── PropertyModel serving (doc 04 §9.2/§9.3, doc 06 §12) ───────────────────
+class PropertyModelStats(BaseModel):
+    """NaN-aware value statistics over a PropertyModel level (doc 04 §9.2 ``stats``).
+
+    ``p1``/``p99`` seed the viewer's default transfer-function clamp (doc 06 §12). All
+    fields are ``None`` for an all-NaN (fully masked) volume.
+    """
+
+    min: float | None = None
+    max: float | None = None
+    p1: float | None = None
+    p99: float | None = None
+
+
+class PropertyModelMeta(BaseModel):
+    """``GET /property-models/{id}`` (doc 04 §9.2): PropertyModel meta the viewer seeds from.
+
+    ``shape``/``origin``/``spacing`` are level-0 ``(z, y, x)`` (Engineering m, Z-up,
+    doc 02 §10.2). ``colormap``/``scaling``/``displayRange`` come from the property-type
+    registry (doc 01 §5) so the client seeds transfer functions; ``stats`` are NaN-aware
+    over level 0.
+    """
+
+    id: str
+    property: str
+    canonicalUnit: str
+    scaling: str
+    colormap: str | None = None
+    displayRange: list[float] | None = None
+    shape: list[int]
+    origin: list[float]
+    spacing: list[float]
+    levels: int
+    stats: PropertyModelStats
+    frame: dict[str, Any] | None = None
+    hasSigma: bool = False
+
+
+class VolumeMeta(BaseModel):
+    """Sidecar JSON for the M1 ``/volume`` raw buffer (doc 06 §1.3 single-resident path).
+
+    Describes the contiguous little-endian float32 ``(z, y, x)`` buffer the ``/volume``
+    endpoint streams: its level, shape, origin and spacing (Engineering m). ``noData`` is
+    NaN (doc 02 §10.2).
+    """
+
+    id: str
+    property: str
+    level: int
+    shape: list[int]
+    origin: list[float]
+    spacing: list[float]
+    dtype: str = "float32"
+    byteOrder: str = "little"
+    noData: str = "NaN"
+
+
+class SliceRequest(BaseModel):
+    """``POST /property-models/{id}/slice`` body (doc 04 §9.3 ``SliceRequest``).
+
+    M1 supports the axis-aligned planes (``x|y|z``); ``position`` is an index into that
+    axis (M1 uses index addressing). Default ``encoding`` is raw ``f32`` to the client
+    (doc 04 §9.3 / DECISIONS.md — colours stay locked to the volume).
+    """
+
+    plane: str  # "x" | "y" | "z"
+    position: int = 0  # index along the plane axis (M1)
+    level: int = 0
+    t: int = 0
+    encoding: str = "f32"
+    property: str | None = None
+
+
+class SliceHeader(BaseModel):
+    """JSON header paired with the raw-f32 slice body (doc 04 §9.3 ``SliceResponse``).
+
+    ``width``/``height`` size the 2D plane; ``dx``/``dy`` are the in-plane sample spacing
+    (Engineering m); ``plane_basis`` (``origin``/``u``/``v``, Engineering m) places the
+    quad in the Z-up scene (doc 06 §4).
+    """
+
+    width: int
+    height: int
+    dx: float
+    dy: float
+    plane_basis: dict[str, list[float]]
+    encoding: str = "f32"
+    dtype: str = "float32"

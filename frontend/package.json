@@ -9,7 +9,8 @@
     "build": "tsc -b && vite build",
     "preview": "vite preview",
     "lint": "eslint .",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test": "esbuild src/lib/volume.test.ts --bundle --platform=node --format=esm --packages=external --outfile=.test-out/volume.test.mjs && node --test .test-out/"
   },
   "dependencies": {
     "react": "^18.3.1",
