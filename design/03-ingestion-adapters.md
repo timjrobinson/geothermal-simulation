@@ -61,7 +61,7 @@ class IngestionAdapter(Protocol):
         pipeline can normalize. Adapter does NOT reproject or convert units itself."""
 ```
 
-`RawObservation` / `RawPropertyModel` / `RawFeature` are the **pre-normalization** twins of the doc 02 primitives (Observation / PropertyModel / GeologicalFeature, OVERVIEW §2). They carry native-frame coordinates and native units plus a `support` descriptor (point / line / 2D-section / 3D-grid / mesh / well-path). The pipeline transforms them in place into the canonical doc 02 primitives. **Flag for doc 02:** the exact field set of the canonical primitives (geometry encoding, uncertainty representation, support-geometry enum, time-axis encoding) is owned by doc 02 — this doc assumes those names/shapes and lists what it needs in §10.
+`RawObservation` / `RawPropertyModel` / `RawFeature` are the **pre-normalization** twins of the doc 02 primitives (ObservationSet / PropertyModel / GeologicalFeature, OVERVIEW §2). They carry native-frame coordinates and native units. The pipeline transforms them in place into the canonical doc 02 primitives, where geometry is classified by the **frozen vocabulary** (doc 02 §3–4): observations by `geometryKind` ∈ `points | soundings | profile2d | traces | raster2d | wellcurve | tensor`, and property models by `support.kind` ∈ `volume | grid2d | section | mesh`. The exact field set of the canonical primitives (geometry encoding, uncertainty representation, time-axis encoding) is owned by doc 02 — this doc assumes those names/shapes and aligns to them in §10.
 
 ### Registration
 
@@ -81,39 +81,40 @@ def adapters_for(method=None, ext=None): ...        # lookup helpers
 def detect(sample, filename) -> IngestionAdapter:   # highest sniff() score wins
 
 # Plugins outside core register via setuptools entry-point group:
-#   [project.entry-points."geosim.adapters"]
+#   [project.entry-points."geosim.plugins"]
 #   my_adapter = "mypkg.adapters:MyAdapter"
 ```
 
-The same registry pattern is shared with the property-type registry (doc 01 §5) and the plugin architecture (doc 08) — **flag for doc 08:** confirm one unified `geosim.*` entry-point namespace.
+The same registry pattern is shared with the property-type registry (doc 01 §5) and the plugin architecture (doc 08), under the unified `geosim.plugins` entry-point group (doc 08).
 
 ---
 
 ## 2. Per-method adapters — the enforced contract
 
-This is OVERVIEW §3's table made executable. Each row is one (or more) registered adapter(s). "Emits → support" is the normalized primitive and the geometry it attaches to. Parsing libraries are from the OVERVIEW §5 stack.
+This is OVERVIEW §3's table made executable. Each row is one (or more) registered adapter(s). Method/submethod use the **canonical `MethodKey` registry** (doc 02 §2): subtypes (seismic reflection/refraction, EM tdem/fdem/aem, ERT/IP dc_resistivity/ip_time/ip_freq) go in the `submethod` field, never as new top-level method keys. "Emits → support" is the normalized primitive and the geometry it attaches to — observations classify by `geometryKind`, property models by `support.kind` (doc 02 §3–4). Parsing libraries are from the OVERVIEW §5 stack.
 
-| Method (`method`) | Native formats | Parse library | Emits → support geometry |
+| Method (`method` / `submethod`) | Native formats | Parse library | Emits → geometry |
 |---|---|---|---|
-| **gravity** | CSV/columns, `.grd` (Surfer/GMT), netCDF, BGI | `pandas`, `xarray`, `rasterio` (`.grd`) | `Observation`(point: g, anomaly) → **stations (point set)**; if pre-gridded: `PropertyModel`(anomaly) → **2D grid** → optionally inverted density → **3D grid** |
-| **magnetics** | ASEG-GDF, CSV, `.grd`, netCDF | `pandas` + `aseg_gdf2`, `xarray` | `Observation`(TMI/anomaly) → **line/point set**; `PropertyModel`(anomaly) → **2D grid**; inverted susceptibility → **3D grid** |
-| **ert** | AGI `.stg`, Res2DInv `.dat`, UBC, ABEM `.amp` | custom text parsers; `pygimli` readers where available | `Observation`(apparent ρ + electrode geometry) → **2D pseudosection (line)**; inverted ρ → `PropertyModel` → **2D section** or **3D grid** |
-| **ip** | AGI, UBC (paired with ERT) | same as ERT | `Observation`(chargeability) → **pseudosection**; `PropertyModel`(chargeability) → **2D/3D grid** |
-| **em** (TEM/AEM) | ASEG-GDF, USF, `.xyz`, netCDF | `pandas` + `aseg_gdf2`; `xarray` | `Observation`(decay curves per sounding) → **point/line of soundings**; layered/CDI inversion → `PropertyModel`(conductivity-depth) → **stitched 3D grid** (§4) |
-| **mt** | EDI (impedance tensor), ModEM/UBC inverted, `.j` | `mtpy` (EDI), custom ModEM/UBC readers | `Observation`(Z(f), tipper, app-ρ/phase curves) → **point set of sites**; inverted → `PropertyModel`(resistivity) → **3D grid** |
-| **seismic_reflection** | SEG-Y, velocity cubes (SEG-Y/netCDF), horizon ASCII | `segyio`, `xarray`; horizons via `pandas` | `Observation`(traces, optional) → **2D/3D survey geometry**; `PropertyModel`(velocity/amplitude) → **3D grid**; `GeologicalFeature`(horizons, faults) → **surfaces/sticks** |
-| **seismic_refraction** | SEG-Y (first breaks), Rayfract/`.tomo` grids | `segyio`, custom tomo readers | `PropertyModel`(Vp) → **2D/3D grid** |
+| **gravity** | CSV/columns, `.grd` (Surfer/GMT), netCDF, BGI | `pandas`, `xarray`, `rasterio` (`.grd`) | `Observation`(`points`: g, gravity_anomaly) → **stations**; if pre-gridded: `PropertyModel`(gravity_anomaly, support.kind=`grid2d`) → optionally inverted density → `volume` |
+| **magnetics** | ASEG-GDF, CSV, `.grd`, netCDF | `pandas` + `aseg_gdf2`, `xarray` | `Observation`(TMI/magnetic_field, `points`) → **point set**; `PropertyModel`(`grid2d`); inverted susceptibility → `volume` |
+| **ert** (submethod=`dc_resistivity`) | AGI `.stg`, Res2DInv `.dat`, UBC, ABEM `.amp` | custom text parsers; `pygimli` readers where available | `Observation`(apparent ρ + electrode geometry, `profile2d`) → **pseudosection**; inverted ρ → `PropertyModel` support.kind=`section` (native curtain, doc 02 §4) or `volume` |
+| **ip** (submethod=`ip_time` / `ip_freq`) | AGI, UBC (paired with ERT) | same as ERT | `Observation`(`profile2d`) carrying chargeability_time_ms (`ip_time`) / phase_mrad or chargeability_mv_v (`ip_freq`) → **pseudosection**; `PropertyModel` → `section` / `volume` |
+| **em** (submethod=`tdem` / `fdem` / `aem`) | ASEG-GDF, USF, `.xyz`, netCDF | `pandas` + `aseg_gdf2`; `xarray` | `Observation`(decay curves per sounding, `soundings`) → **soundings**; layered/CDI inversion → `PropertyModel`(conductivity) → **stitched `volume`** (§4) |
+| **mt** | EDI (impedance tensor), ModEM/UBC inverted, `.j` | `mtpy` (EDI), custom ModEM/UBC readers | `Observation`(Z(f), tipper, app-ρ/phase curves, `tensor`) → **sites**; inverted → `PropertyModel`(resistivity) → `volume` |
+| **seismic** (submethod=`reflection`) | SEG-Y, velocity cubes (SEG-Y/netCDF), horizon ASCII | `segyio`, `xarray`; horizons via `pandas` | `Observation`(`traces`, optional) → **survey geometry**; `PropertyModel`(velocity_p/amplitude) → `volume`; `GeologicalFeature`(horizons, faults) → **surfaces/sticks** |
+| **seismic** (submethod=`refraction` / `tomography`) | SEG-Y (first breaks), Rayfract/`.tomo` grids | `segyio`, custom tomo readers | `PropertyModel`(velocity_p) → `section` (2D line) or `volume` |
 | **microseismic** | QuakeML, CSV catalogs, NonLinLoc `.hyp` | `obspy` (QuakeML/`.hyp`), `pandas` (CSV) | `Observation`/`GeologicalFeature`(event cloud) → **4D point cloud** (x,y,z,t,mag) |
-| **insar** | GeoTIFF time-series, `.unw`, CSV (PS points) | `rasterio` (raster), `pandas` (PS) | `PropertyModel`(LOS deformation) → **2D raster time-series (4D)**; PS → `Observation` → **point set (4D)** |
-| **well_log** | LAS 1.2/2.0/3.0, DLIS | `lasio` (LAS), `dlisio` (DLIS) | `Observation`(curves vs MD) → **well path (1D along borehole)**; needs deviation survey (§5) for MD→XYZ |
-| **temperature** | CSV, LAS (continuous T log) | `pandas`, `lasio` | `Observation`(T point or T-vs-depth) → **point** or **1D well profile** |
-| **geology_map** | Shapefile, GeoJSON, GeoPackage, KML | `geopandas`, `fiona` | `GeologicalFeature`(contacts, faults, unit polygons) → **surface features / unit solids** (2.5D draped, §5) |
-| **geochemistry** | CSV / LIMS exports, XLSX | `pandas`, `openpyxl` | `Observation`(sample assays) → **point set** (often at surface or at a well MD) |
+| **insar** | GeoTIFF time-series, `.unw`, CSV (PS points) | `rasterio` (raster), `pandas` (PS) | `PropertyModel`(deformation, support.kind=`grid2d`) → **raster time-series (4D)**; PS → `Observation`(`points`, 4D) |
+| **welllog** | LAS 1.2/2.0/3.0, DLIS | `lasio` (LAS), `dlisio` (DLIS) | `Observation`(curves vs MD, `geometryKind:"wellcurve"`) **+** a `wellPath` `GeologicalFeature` joined by `wellId`; needs deviation survey (§5) for MD→XYZ |
+| **heatflow** (temperature logs) | CSV, LAS (continuous T log) | `pandas`, `lasio` | `Observation`(temperature, canonical **kelvin**) → `points` (point T) or `wellcurve` (T-vs-depth log, joined to a `wellPath`) |
+| **geology** (maps) | Shapefile, GeoJSON, GeoPackage, KML | `geopandas`, `fiona` | `GeologicalFeature`(contacts, faults, unit polygons) → **surface features / unit solids** (2.5D draped, §5) |
+| **geochem** | CSV / LIMS exports, XLSX | `pandas`, `openpyxl` | `Observation`(sample assays, `points`) → **point set** (often at surface or at a well MD) |
 
 **Notes that are contract, not commentary:**
-- Methods that arrive *already inverted* (resistivity/velocity/density volumes) emit a `PropertyModel` directly — the platform is integration-first (OVERVIEW §1); forward/inverse modeling is later (doc 10). Raw-only files emit `Observation`s and a later inversion plugin produces the `PropertyModel`.
-- A single file may emit multiple primitive kinds (SEG-Y volume + horizon export; ERT raw + inverted section). Adapters return all of them in one `ParseResult`.
+- Methods that arrive *already inverted* (resistivity/velocity/density volumes/sections) emit a `PropertyModel` directly — the platform is integration-first (OVERVIEW §1); forward/inverse modeling is later (doc 10). Raw-only files emit `Observation`s and a later inversion plugin produces the `PropertyModel`.
+- A single file may emit multiple primitive kinds (SEG-Y volume + horizon export; ERT raw `profile2d` + inverted `section`). Adapters return all of them in one `ParseResult`.
 - Every emitted primitive declares its `property_type` (doc 01 §5 registry key) so units and colormaps resolve automatically. An unknown property type is a hard error surfaced at ingest (it must be registered first — doc 08).
+- **Per-observation errors (doc 02 §3 convention).** Each measured value column carries a paired sigma column (`role:"sigma"`, `errorFor:"<value>"`, in the value's unit); tensors/traces declare an `methodData.errorModel` instead. When a source carries no errors, ingestion applies the per-property **default noise floor** from the registry and records that substitution in provenance — measured data is never silently treated as error-free.
 
 ---
 
@@ -140,8 +141,8 @@ Gridding is **never** applied silently to make a `PropertyModel` out of raw obs 
 
 **d. 1D/2D → 3D placement.** Soundings, profiles, and pseudosections are intrinsically lower-dimensional but live in 3D:
 - **1D sounding** → a vertical column at its (x,y); the conductivity-depth model becomes voxels along Z at that column. Many columns → §4 stitching.
-- **2D profile/section** (ERT, seismic 2D) → a vertical "curtain" mesh following the survey line's polyline in plan, extruded down. Stored as an unstructured 2D-in-3D section (support = `section`), not forced into the voxel grid until the user resamples to the fused grid (OVERVIEW §2, fusion is non-destructive).
-- **Well log** → curves sampled along the well-path polyline (MD→XYZ via deviation survey), support = `well_path`.
+- **2D profile/section** (ERT, seismic 2D) → a vertical "curtain" following the survey line's polyline in plan, extruded down. The raw measurements stay an `Observation` (`geometryKind:"profile2d"`); an inverted curtain is a `PropertyModel` with the native **`SectionSupport`** (`support.kind:"section"`, doc 02 §4) — a 2D field embedded in 3D along the polyline, not forced into the voxel grid until the user resamples to the fused grid (OVERVIEW §2, fusion is non-destructive).
+- **Well log** → curves sampled against MD become a `wellcurve` `Observation` (immutable measured record), while the borehole trajectory (MD→XYZ via deviation survey) is a separate `wellPath` `GeologicalFeature`; the two are joined by `wellId` (doc 02 §3, §5). There is no `well_path` *support* kind.
 
 ---
 
@@ -161,7 +162,7 @@ The native soundings are **kept as `Observation`s**; the stitched volume is a de
 
 - **Deviation survey** (doc 01 §4): well-log and temperature adapters must locate a borehole's `(MD, inclination, azimuth)` table. If the LAS/DLIS lacks one, ingest emits a *vertical-well assumption* warning and treats MD=TVD below the wellhead until a deviation survey is supplied. Wellhead (x,y,elev) is mandatory for placement (§6).
 - **Geology maps are 2.5D**: polygons/lines are planar in CRS; they're draped onto `surfaceModel` (doc 01 §6) to get Z, unless the file carries explicit Z (e.g. modeled horizon). Unit *solids* require a geomodel (GemPy, doc 05/07) — the map adapter emits surface features only and flags that solids are downstream.
-- **Microseismic / InSAR carry time**: `t` is parsed into the primitive's time axis (OVERVIEW §2 4D). **Flag for doc 02:** confirm time-axis encoding (absolute UTC vs project epoch offset).
+- **Microseismic / InSAR carry time**: `t` is parsed into the primitive's time axis (OVERVIEW §2 4D). Time-axis encoding is fixed by doc 02 §1/§8 — a Dataset-level `TimeAxis` with a leading `t` array axis and **explicit ISO-8601 UTC epochs** (not project-epoch offsets).
 
 ---
 
@@ -183,7 +184,7 @@ Every ingest produces a structured **`IngestReport`** (stored, shown in UI): cou
 | Time axis (4D methods) | yes for 4D | `failed` for that primitive only; others proceed |
 | Uncertainty | no | absent → null uncertainty; flagged so fusion knows |
 
-**Partial-file policy:** parsing is per-record where possible. A bad CSV row / corrupt SEG-Y trace is skipped, counted, and reported; the rest ingests (`ok_with_warnings`). A corrupt *header* (can't establish geometry/units for the whole file) is `failed`. Threshold: if >X% of records drop, escalate to `failed` (**open question — see §10**).
+**Partial-file policy:** parsing is per-record where possible. A bad CSV row / corrupt SEG-Y trace is skipped, counted, and reported; the rest ingests (`ok_with_warnings`). A corrupt *header* (can't establish geometry/units for the whole file) is `failed`. Threshold: if **>10%** of records drop, escalate to `failed` (fixed default, overridable per upload — DECISIONS, doc 03).
 
 **CRS/units missing** never silently guesses a real-world position. Worst case it lands in local/Engineering space with a loud warning, and can be georeferenced later (doc 01 §2 promote path).
 
@@ -212,8 +213,8 @@ Every ingest produces a structured **`IngestReport`** (stored, shown in UI): cou
 ## 8. Idempotency, re-ingest, provenance
 
 - **Idempotency key = sha256(raw bytes) + adapter name + adapter version + normalization params**. Same key already in catalog → skip parse, return the existing dataset (no duplicates). This makes the synthetic generator's repeated runs (OVERVIEW §8) cheap and exercising the pipeline safe.
-- **Re-ingest with new params** (e.g. different gridding, a now-supplied CRS) → new key → new derived primitives, **same raw file** (deduped by content hash). Old derived versions are retained or superseded per doc 02's versioning (**flag for doc 02:** primitive versioning / supersede semantics).
-- **Provenance linkage** (OVERVIEW §2, doc 01 §7): every primitive stores a `Provenance` edge to (a) the raw file hash + path, (b) adapter name+version, (c) source CRS/datum/units before normalization, (d) normalization params (gridding method, variogram, etc.). This makes every transform auditable and reversible, and lets a re-projection later replay from raw. **Flag for doc 02:** owns the `Provenance` schema; this doc only populates it.
+- **Re-ingest with new params** (e.g. different gridding, a now-supplied CRS) → new key → new derived primitives, **same raw file** (deduped by content hash). Per doc 02 §9: observations are immutable (a corrected re-import is a *new* dataset linked to the prior); derived artifacts version-on-change (`seq+1`, parent set) with content-addressed bulk sharing — all versions retained.
+- **Provenance linkage** (OVERVIEW §2, doc 01 §7): every primitive stores a `Provenance` edge to (a) the raw file hash + path, (b) adapter name+version, (c) source CRS/datum/units before normalization, (d) normalization params (gridding method, variogram, etc.). This makes every transform auditable and lets a re-projection later replay from raw. Doc 02 §7 owns the `Provenance` schema (`SourceFile` / `Step` / reversible `Transform`); this doc only populates it.
 
 ---
 
@@ -238,12 +239,14 @@ No core, storage, viewer, or transform code changes — that's the contract OVER
 4. **Raw stays raw**: observations are never auto-gridded into property models; gridding is an explicit, provenance-recorded modeling step (`verde` default, kriging when uncertainty wanted, IDW fallback).
 5. **1D soundings / 2D sections are placed in 3D as columns/curtains** and only resampled to the fused grid non-destructively; AEM/TEM/MT stitching is the standard 1D→3D pattern with DOI masking.
 6. **Idempotency = content hash + adapter version + normalization params**; raw files deduped by sha256; provenance links every primitive back to exact raw bytes.
-7. **Fail loud on ambiguous geometry/units, degrade on partial data.** Missing units → canonical-unit assumption with high-severity warning; missing CRS in a georef project → `failed`; bad records skipped and counted.
-8. **Registration via decorator + setuptools entry-points** under a shared `geosim.*` namespace, enabling out-of-tree adapter plugins.
+7. **Fail loud on ambiguous geometry/units, degrade on partial data.** Missing units → canonical-unit assumption with high-severity warning; missing CRS in a georef project → `failed`; bad records skipped and counted; **>10%** of records dropped escalates the whole file to `failed` (fixed default, overridable per upload).
+8. **Registration via decorator + setuptools entry-points** under the shared `geosim.plugins` entry-point group (doc 08), enabling out-of-tree adapter plugins.
 
-### Open questions for you
+### Resolved decisions
 
-*(see RETURN-TO-USER section below — top forks surfaced there)*
+- **Partial-file failure threshold** — fixed at **>10%** of records dropped → `failed`, overridable per upload (DECISIONS, doc 03).
+- **Pre-inverted vs raw** — files that arrive already inverted emit a `PropertyModel`; raw-only files emit `Observation`s and wait for an inversion plugin. Gridding raw → volume is always a separate, user-initiated, provenance-recorded step (raw stays raw).
+- **Plugin entry-point group** — unified `geosim.plugins` (doc 08), not `geosim.adapters`.
 
 ---
 
@@ -251,8 +254,8 @@ No core, storage, viewer, or transform code changes — that's the contract OVER
 
 Doc 02 is final; the names this doc assumed now bind to it:
 - **Primitives:** adapters emit `ObservationSet` / `PropertyModel` / `GeologicalFeature` (doc 02 §3–5). The pre-normalization `Raw*` twins map onto these.
-- **Support / geometry vocabulary:** observations classify by **`geometryKind`** ∈ `points | soundings | profile2d | traces | raster2d | wellcurve | tensor` (doc 02 §3); property-model **`support.kind`** ∈ `volume | grid2d | mesh` (doc 02 §4). Use these exact tokens — the earlier ad-hoc list (point/line/section/…) is superseded.
-- **Uncertainty:** co-registered per-cell **1σ** array `<property>_sigma` (+ optional DOI/kernel), doc 02 §6. Adapters that ingest already-inverted models pass σ through when present.
+- **Support / geometry vocabulary:** observations classify by **`geometryKind`** ∈ `points | soundings | profile2d | traces | raster2d | wellcurve | tensor` (doc 02 §3); property-model **`support.kind`** ∈ `volume | grid2d | section | mesh` (doc 02 §4, where `section`/`SectionSupport` is the native form for ERT and 2D-seismic vertical curtains). Use these exact tokens — the earlier ad-hoc list (point/line/section-string/well_path/…) is superseded.
+- **Uncertainty:** per-observation **paired sigma columns** (`role:"sigma"`, `errorFor:"<value>"`) on tables, `methodData.errorModel` for tensors/traces, default noise floor in provenance when absent (doc 02 §3); for property models a co-registered per-cell **1σ** array `<property>_sigma` (+ optional DOI/kernel), doc 02 §6. Adapters that ingest already-inverted models pass σ through when present.
 - **Time-axis encoding:** `TimeAxis` at the Dataset level, **leading `t` axis**, **explicit ISO-8601 UTC epochs** (doc 02 §1, §8) — not project-epoch offsets.
 - **Provenance:** this doc populates the doc 02 §7 `Provenance` DAG — `SourceFile` (raw sha256, format, originalCrs/Unit), `Step` (op/params/code), and **reversible `Transform`** records for every CRS/unit/datum change.
 - **Versioning / re-ingest:** doc 02 §9 — observations **immutable**; a corrected re-import is a *new* dataset with provenance linking to the prior (not an in-place supersede).

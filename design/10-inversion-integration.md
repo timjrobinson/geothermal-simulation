@@ -65,11 +65,18 @@ Each stage is independently shippable and each delivers value alone. **Do not bu
 
 ## 2. The inversion engine plugin interface
 
-Conforms to the plugin framework (08). **Assumed contract from 08** (flag if 08
-diverges): plugins are registered Python entry points discovered at startup; each
-declares a `kind`, a stable `id`, a JSON-schema'd parameter block, and a typed
-`run()` entrypoint; the host owns lifecycle, sandboxing, and dependency isolation
-(see §9 — inversion deps are heavy and may warrant a separate environment/process).
+Conforms to the plugin framework (08). **Contract from 08:** plugins are registered
+via 08's dual discovery (decorators for first-party / entry points for third-party,
+one registry); each declares a `kind`, a stable `id`/`key`, a JSON-schema'd parameter
+block, and a typed entrypoint; the host owns lifecycle and load-time validation.
+**Process placement is doc 08's `executionMode` (08 §2.1), not a scheme invented here:**
+inversion engines declare `worker_process` / `container` / `remote_worker` because
+their deps are heavy and conflicting (see §9). This **AGREES** with doc 08's
+in-process-trusted default — that default covers *lightweight* contributions; heavy
+inversion engines opt into a separate process/container/remote worker on doc 08's
+*process-isolation axis* (an engineering placement choice), which is orthogonal to
+the *trust axis* (engines are still trusted code, single-user). No separate isolation
+or sandboxing scheme is defined in this doc.
 
 We add one new plugin **kind**: `inversion-engine`.
 
@@ -83,7 +90,8 @@ InversionEngineSpec {
   "version": "0.22.x",
 
   // What it can invert. Drives UI ("which datasets can feed this?")
-  "methods": ["gravity"],             // method ids from OVERVIEW §3 catalog
+  "methods": ["gravity"],             // canonical MethodKey(s) (doc 02 §2)
+  "submethods": ["dc_resistivity"],   // optional: canonical submethod(s) under method (doc 02 §2); omit if N/A
   "outputProperty": "density",        // canonical property type (01 §5 registry)
   "dimensionality": "3D",             // 1D | 2D | 3D | 2.5D
 
@@ -111,7 +119,7 @@ def run(ctx: InversionContext) -> InversionResult: ...
 ```jsonc
 // INPUT
 InversionContext {
-  "observations":   [ObservationRef, ...],   // 02 — resolved to data + geometry + uncertainty
+  "observations":   [ObservationRef, ...],   // 02 — data + geometry + per-obs σ (02 §3 sigma cols / methodData.errorModel)
   "domain":         ModelDomain,             // §4 — mesh + active cells in Engineering Frame
   "startingModel":  PropertyModelRef | const | null,   // initial m0
   "referenceModel": PropertyModelRef | const | null,   // m_ref for regularization (§5, §6)
@@ -159,19 +167,28 @@ mask}. Flag to 02.
 ## 3. Job orchestration (long, heavy jobs)
 
 Inversions are minutes-to-hours, CPU- (sometimes GPU-) bound, and must survive
-restarts. They run as **background jobs on the task queue from doc 04** (OVERVIEW §5:
-"background tasks first; Celery/RQ when needed"). **Assumed job contract from 04**
-(flag if it diverges): submit → `job_id`; status polling + WebSocket push; cancel;
-artifacts written to storage and registered in the catalog.
+restarts. They run as **background jobs on doc 04's job system** — **RQ + Redis
+workers** (doc 04 §9.4, the locked default), against doc 04's `jobs` table and its
+**single job contract** (table + endpoints + WebSocket). **Doc 04 is the authoritative
+job/API contract; this doc invents no new endpoints.** Inversion is just another
+job `kind` on that contract (alongside `ingest`/`fuse`/`pyramid`/`transform`), and
+its produced `PropertyModel` is registered in the catalog (04) like any other.
+
+Submission uses doc 04's **resource-style** endpoints (a sub-resource action that
+returns a `job_id`), mirroring `POST .../datasets:ingest → {job_id}` — *not* a
+bespoke `POST /jobs/inversion`. Concretely (doc 04 §9.2 owns the exact shapes):
 
 ```
-POST /jobs/inversion
+POST /property-models:invert            # resource action → enqueue on doc 04's queue
   { engineId, observationIds[], domainSpec, params, startingModelId?, referenceModelId? }
-    → { jobId }                       # validated against engine.paramsSchema first
-GET  /jobs/{jobId}                    → { state, progress, diagnostics, resultModelId? }
-WS   /jobs/{jobId}/stream             → live { iter, phi_d, phi_m, beta } for plots
-POST /jobs/{jobId}/cancel
+    → { job_id }                        # params validated against engine.paramsSchema first
+GET  /jobs/{job_id}                     → Job { status, progress, message, result_json }  (doc 04 §9.2)
+WS   /jobs/{job_id}/progress            → doc 04's progress channel; engine pushes { iter, phi_d, phi_m, beta }
+POST /jobs/{job_id}:cancel              → 202   (doc 04 §9.2)
 ```
+
+Live convergence telemetry (`iter, phi_d, phi_m, beta`) rides doc 04's existing job
+progress WebSocket — a richer `message`/progress payload, not a separate stream.
 
 | Concern | Approach |
 |---|---|
@@ -182,8 +199,9 @@ POST /jobs/{jobId}/cancel
 | **Concurrency** | One heavy inversion can saturate a workstation. Scheduler respects `compute.memoryHintGB` and a configurable max-concurrent-heavy-jobs (default **1** local). |
 | **Reproducibility** | Every job records the full `InversionProvenance` (§7) so a result can be regenerated bit-for-bit (seeded) or re-run with one changed param. |
 
-**Need from doc 04:** checkpoint blob storage keyed by `job_id`, and a job-artifact
-link so the produced `PropertyModel` is discoverable from the job and vice-versa.
+**Need from doc 04** (additive to its locked contract): checkpoint blob storage keyed
+by `job_id`, and a job↔artifact link (`jobs.result_json` → the produced
+`PropertyModel` id) so the result is discoverable from the job and vice-versa.
 
 ---
 
@@ -220,8 +238,8 @@ ModelDomain {
 | Mesh | Library | Used by | Why |
 |---|---|---|---|
 | `TensorMesh` | discretize/SimPEG | gravity, mag, MT, simple DC | regular, simple, fast assembly |
-| `TreeMesh` (octree) | discretize/SimPEG | EM/TDEM/FDEM, MT, focused gravity/mag | refine near sources/receivers, coarsen at depth → fewer cells |
-| `SimplexMesh` / tetra | PyGIMLi (+ discretize SimplexMesh) | ERT/IP, traveltime, complex topography | conforms to topography & electrodes |
+| `TreeMesh` (octree) | discretize/SimPEG | `em` (tdem/fdem/aem), `mt`, focused `gravity`/`magnetics` | refine near sources/receivers, coarsen at depth → fewer cells |
+| `SimplexMesh` / tetra | PyGIMLi (+ discretize SimplexMesh) | `ert`/`ip` (dc_resistivity/ip_*), `seismic` refraction/tomography, complex topography | conforms to topography & electrodes |
 
 ### 4.3 Core, padding, and the air
 
@@ -271,14 +289,19 @@ choices* as by the data. Those choices must be explicit, validated, and recorded
 | `startingModel` (m0) | initial guess | reference / best-guess |
 | `bounds` | physical bounds (e.g. ρ ∈ [1, 10⁴] Ω·m) | property registry (01) |
 | `beta / chi_factor` | trade-off; cooling schedule; target data misfit (χ=1 ≈ fit to noise) | β cooling, χ=1 |
-| `noiseFloor / dataWeights` | uncertainty model on the data (from Observation errors, 02) | from 02 obs errors |
+| `noiseFloor / dataWeights` | data weights = 1/σ², σ from the **per-observation `sigma` columns / `methodData.errorModel` (doc 02 §3)** | from doc 02 §3 sigmas; default noise floor when absent |
 | `maxIterations`, `tol` | stopping | 20–40 / library |
 | `seed` | RNG seed for any stochastic step | fixed for reproducibility |
 
 **Defaults must be sane out of the box** — a user picks a dataset + an engine and
 gets a defensible inversion with no tuning, then refines. The data uncertainty
-(`noiseFloor`/`dataWeights`) **comes from the Observation error fields (02)** — flag
-that 02 carries per-datum noise estimates.
+(`noiseFloor`/`dataWeights`) **comes from doc 02 §3's per-observation error
+convention (now defined), not a parallel uncertainty schema invented here:** each
+measured value column carries a paired `sigma` column (`role:"sigma"`,
+`errorFor:"<value>"`); tensors/traces carry `methodData.errorModel`. The engine
+builds data weights = 1/σ² directly from these. When a source has no errors, doc 02
+§3's **per-property default noise floor** (from the property registry, recorded in
+provenance) is consumed — the engine never treats data as error-free.
 
 ---
 
@@ -364,18 +387,21 @@ schema churn.
 The backend is Python + FastAPI specifically to reach this ecosystem (OVERVIEW §5).
 Engines wrap these; the platform owns the boundary, not the math.
 
-| Method (OVERVIEW §3) | Library | Mesh / data objects | Output property | Notes |
+Method names below are the **canonical `method` + `submethod` keys (doc 02 §2)** —
+never ad-hoc groupings like "DC resistivity"/"FDEM/TDEM"/"AEM".
+
+| `method` / `submethod` (doc 02 §2) | Library | Mesh / data objects | Output property | Notes |
 |---|---|---|---|---|
-| Gravity / gradiometry | **SimPEG** | TensorMesh / TreeMesh; `gravity.Survey` | density | linear → fast; non-unique, smooth |
-| Magnetics | **SimPEG** | TensorMesh / TreeMesh; `magnetics.Survey` | susceptibility | linear; remanence/MVI as extension |
-| DC resistivity | **SimPEG** / **PyGIMLi (ERT)** | Tensor/Tree (SimPEG) · SimplexMesh (PyGIMLi) | resistivity | PyGIMLi excels at topography-conforming ERT |
-| Induced Polarization | **SimPEG** / **PyGIMLi** | as DC | chargeability | usually after a DC inversion |
-| FDEM / TDEM / AEM | **SimPEG** (EM) | **TreeMesh** (octree near tx/rx) | conductivity | heavy; octree essential |
-| Magnetotellurics (MT) | **SimPEG** (NSEM) | TensorMesh / TreeMesh; impedance/tipper | resistivity (deep) | big 3D; padding-heavy; smooth/deep |
-| Seismic refraction (traveltime) | **PyGIMLi** (Refraction) | SimplexMesh | velocity | ray-based tomography |
-| Seismic reflection / FWI | **ObsPy** (I/O) + (Devito / specialist) | external/regular grids | velocity/impedance | FWI is out of scope near-term; ingest results |
-| Passive / microseismic | **ObsPy** | event catalogs | event cloud (4D) | location/detection, not field inversion |
-| Implicit geology | **GemPy** | implicit scalar field | lithology / surfaces | constrained "geometry inversion"; feeds 5c structure |
+| `gravity` | **SimPEG** | TensorMesh / TreeMesh; `gravity.Survey` | density | linear → fast; non-unique, smooth |
+| `magnetics` | **SimPEG** | TensorMesh / TreeMesh; `magnetics.Survey` | susceptibility | linear; remanence/MVI as extension |
+| `ert` / `dc_resistivity` | **SimPEG** / **PyGIMLi (ERT)** | Tensor/Tree (SimPEG) · SimplexMesh (PyGIMLi) | resistivity | PyGIMLi excels at topography-conforming ERT |
+| `ip` / `ip_time`,`ip_freq` | **SimPEG** / **PyGIMLi** | as `ert` | chargeability | usually after a `dc_resistivity` inversion |
+| `em` / `tdem`,`fdem`,`aem` | **SimPEG** (EM) | **TreeMesh** (octree near tx/rx) | conductivity | heavy; octree essential |
+| `mt` | **SimPEG** (NSEM) | TensorMesh / TreeMesh; impedance/tipper | resistivity (deep) | big 3D; padding-heavy; smooth/deep |
+| `seismic` / `refraction`,`tomography` | **PyGIMLi** (Refraction) | SimplexMesh | velocity | ray-based traveltime tomography |
+| `seismic` / `reflection` (+ FWI) | **ObsPy** (I/O) + (Devito / specialist) | external/regular grids | velocity/impedance | FWI is out of scope near-term; ingest results |
+| `microseismic` | **ObsPy** | event catalogs | event cloud (4D) | location/detection, not field inversion |
+| `geology` (implicit) | **GemPy** | implicit scalar field | lithology / surfaces | constrained "geometry inversion"; feeds 5c structure |
 
 **Mesh vocabulary (discretize / PyGIMLi):** `TensorMesh` (regular rectilinear),
 `TreeMesh` (octree, adaptive), `SimplexMesh`/tetrahedral (unstructured, conforms to
@@ -395,11 +421,11 @@ OVERVIEW: local-first, single-user. Inversion stresses that hard. Honest tiering
 
 | Workload | Feasible on a workstation? | Notes |
 |---|---|---|
-| Gravity / magnetics 3D (linear) | **Yes** | minutes–tens of min; modest RAM. Good first target. |
-| DC/ERT, IP (2D/3D) | **Yes** (moderate) | PyGIMLi efficient; 3D ERT grows. |
-| Traveltime tomography | **Yes** | light. |
-| MT 3D | **Marginal** | RAM- and time-heavy; coarse OK locally, production wants a server. |
-| FDEM/TDEM 3D, AEM lines × many | **No / marginal** | octree + many transmitters → server/cluster, GPU helps. |
+| `gravity` / `magnetics` 3D (linear) | **Yes** | minutes–tens of min; modest RAM. Good first target. |
+| `ert` (dc_resistivity), `ip` (2D/3D) | **Yes** (moderate) | PyGIMLi efficient; 3D ERT grows. |
+| `seismic` traveltime tomography | **Yes** | light. |
+| `mt` 3D | **Marginal** | RAM- and time-heavy; coarse OK locally, production wants a server. |
+| `em` (fdem/tdem 3D, aem lines × many) | **No / marginal** | octree + many transmitters → server/cluster, GPU helps. |
 | Joint / PGI (5c) | **Marginal→No** | shared big mesh × multiphysics → server class. |
 | Seismic FWI | **No** | cluster/GPU; out of near-term scope (ingest results instead). |
 
@@ -409,10 +435,15 @@ OVERVIEW: local-first, single-user. Inversion stresses that hard. Honest tiering
   remote worker. The job system (04) must allow a **remote/larger worker pool** for
   `device:"gpu"` / high `memoryHintGB` engines — i.e. local-first does **not** mean
   local-only for inversion. Flag to 04: optional remote worker tier.
-- **Dependency isolation:** SimPEG/PyGIMLi/GemPy pull heavy, sometimes conflicting
-  native deps (PETSc, pymatsolver, etc.). Engines should run in **isolated
-  environments / subprocesses** (or containers), not in the FastAPI process. Flag to
-  08 (plugin isolation) and 04 (worker images).
+- **Dependency isolation via doc 08's `executionMode`:** SimPEG/PyGIMLi/GemPy pull
+  heavy, sometimes conflicting native deps (PETSc, pymatsolver, etc.). Engines
+  therefore declare a non-`in_process` `executionMode` (08 §2.1) —
+  `worker_process` (RQ/Redis worker, doc 04), `container` (conflicting native deps),
+  or `remote_worker` (remote/GPU). This is doc 08's per-contribution
+  **process-isolation axis** (engineering placement for deps/CPU/GPU), *not* a
+  sandbox and *not* a security decision — engines remain trusted code, AGREEING with
+  08's in-process-trusted default for the lightweight common case. No new isolation
+  scheme here; doc 04 supplies the worker/container images.
 - **Default posture:** ship 5a for the *workstation-feasible* methods (gravity, mag,
   ERT, traveltime) first; treat MT/EM/joint as "bring a server." The platform stays
   useful locally and scales out per-engine when the user opts in.
@@ -458,9 +489,11 @@ resamplable to) the fused grid.
    in the **Engineering Frame (01)**; results are **resampled onto the Fused grid via
    doc 07** afterward. Native-resolution originals are preserved. The fused grid is
    never the forced inversion mesh.
-4. **Jobs on the doc-04 queue** with progress streaming, checkpointing, cooperative
-   cancellation, and param validation *before* enqueue. Default max 1 concurrent
-   heavy job locally.
+4. **Jobs on doc 04's RQ+Redis queue and single job contract** (jobs table +
+   resource-style endpoints + WS progress) — inversion is just another job `kind`,
+   submitted via a `:invert` resource action returning a `job_id`, never a bespoke
+   inversion endpoint. Progress streaming, checkpointing, cooperative cancellation,
+   and param validation *before* enqueue. Default max 1 concurrent heavy job locally.
 5. **Full reproducibility.** Every result records an `InversionProvenance` (inputs,
    params incl. applied defaults, seed, env, diagnostics) → regenerable / re-runnable.
 6. **Staged coupling.** 5a single-method → 5b cooperative (job DAG, reference/structure
@@ -468,8 +501,9 @@ resamplable to) the fused grid.
    Strict ordering; 5c last.
 7. **Library boundary discipline.** SimPEG/PyGIMLi/GemPy objects are constructed
    *inside* engine plugins; the platform speaks only `Observation`/`PropertyModel`/
-   `ModelDomain`. Engines run in isolated environments/subprocesses (heavy/conflicting
-   deps).
+   `ModelDomain`. Heavy/conflicting-dep engines declare a non-`in_process`
+   `executionMode` (doc 08 §2.1: `worker_process`/`container`/`remote_worker`) — doc
+   08's process-isolation axis, not a bespoke sandbox.
 8. **Local-first ≠ local-only for inversion.** A `compute` profile per engine lets
    jobs target a remote/GPU worker tier; workstation-feasible methods (gravity, mag,
    ERT, traveltime) ship first, MT/EM/joint are "bring a server."
@@ -477,46 +511,46 @@ resamplable to) the fused grid.
    recovered vs ground truth on the fused grid (07); calibrated uncertainty is part
    of "done."
 10. **Non-blocking.** None of this gates the MVP. It only shapes MVP seams in 02
-    (extensible provenance, non-regular mesh support, per-datum obs error,
+    (extensible provenance, non-regular mesh support, per-observation obs error,
     `UncertaintyField`), 04 (checkpoint store, remote worker option), 07 (mesh→grid
-    resampling), 08 (plugin isolation) so inversion drops in additively later.
+    resampling), 08 (`executionMode` already covers heavy-engine placement) so
+    inversion drops in additively later.
 
 ### Contract needs flagged to parallel docs (summary)
 
 | Doc | Need |
 |---|---|
-| 02 | extensible `provenance` block; `support` covers octree/tetra meshes; per-datum noise on Observations; `UncertaintyField` (stddev + DOI/confidence mask) |
-| 04 | checkpoint blob store keyed by job; job↔artifact links; optional remote/GPU worker tier |
+| 02 | extensible `provenance` block; `support` covers octree/tetra meshes; per-observation `sigma` columns / `methodData.errorModel` + default noise floor (02 §3, now defined — inversion consumes this, no parallel schema); `UncertaintyField` (stddev + DOI/confidence mask) |
+| 04 | (additive to its locked RQ+Redis job contract) checkpoint blob store keyed by `job_id`; job↔artifact link (`result_json`); optional remote/GPU worker tier |
 | 05 | ground-truth volumes retrievable & resamplable to the fused grid for scoring |
 | 07 | resampler accepts arbitrary source meshes (Tensor/Tree/Simplex), carries uncertainty through |
-| 08 | new plugin kind `inversion-engine`; isolated-environment/subprocess execution for heavy deps |
+| 08 | new plugin kind `inversion-engine`; heavy engines use doc 08's `executionMode` (`worker_process`/`container`/`remote_worker`, 08 §2.1) — no new isolation scheme |
 
 ---
 
-## Open questions for you
+## Decisions resolved (were open questions)
 
-1. **Which method's inversion do we build first (5a)?** Gravity is the cleanest
-   proof (linear, fast, workstation-friendly, fewest moving parts) but lowest
-   geothermal information; ERT/MT carry the resistivity signal that actually maps a
-   geothermal reservoir (hot, conductive, altered) but are heavier/harder.
-   *Recommended default:* **gravity first** as the engine-plumbing proof, then **ERT**
-   (PyGIMLi, topography-conforming, still local-feasible) as the first
-   geothermally-meaningful one — defer MT until a server tier exists.
+These three forks are **settled** (see `DECISIONS.md` → Inversion). They are no
+longer open; recorded here only as rationale. **All of this remains LATER-PHASE and
+non-blocking** — these choices shape *when* and *how* the later inversion phase
+proceeds, not the MVP.
 
-2. **Where is the local-vs-server compute boundary, and do we commit to a remote
-   worker tier in this phase?** Options: (a) **strictly local** — only ship engines
-   that run on a workstation (gravity/mag/ERT/traveltime), punt MT/EM/joint entirely;
-   (b) **local default + optional remote worker** — engines declare a compute profile,
-   heavy ones target an opt-in remote/GPU worker (changes 04's assumptions); (c)
-   **server-first** for inversion from day one. *Recommended default:* **(b)** — keeps
-   the local-first promise for the common case while not architecturally excluding the
-   heavy methods.
+1. **First engine = `gravity`, then `ert`.** Gravity is the cleanest plumbing proof
+   (linear, fast, workstation-friendly, fewest moving parts); `ert` (PyGIMLi,
+   topography-conforming, still local-feasible) follows as the first
+   geothermally-meaningful method. **`mt` is deferred to a server tier.** Rejected:
+   leading with a heavy resistivity method before the engine plumbing is proven.
 
-3. **How far do we commit to joint inversion (5c) now vs. leaving it as a roadmap
-   stub?** Full joint/PGI is the largest lift and stresses meshing, compute, and the
-   data model the most. Options: (a) **5a only** for this phase, 5b/5c documented but
-   unbuilt; (b) **5a + 5b** (cooperative via sequential job DAG — high value, modest
-   cost, no joint solver); (c) **commit to 5c** with a shared-mesh joint driver.
-   *Recommended default:* **(b)** — cooperative inversion delivers most of the
-   multi-method payoff (the platform's unique co-registration asset) without the
-   shared-mesh joint-solver expense; keep 5c as a validated-prerequisite roadmap item.
+2. **Compute boundary = local default + optional remote/GPU worker, per engine.**
+   Each engine declares a `compute` profile (§2.1) and a doc 08 `executionMode`;
+   workstation-feasible methods run locally, heavy ones opt into an
+   optional remote/GPU worker (doc 04's optional worker tier). Rejected: strictly
+   local (would permanently exclude MT/EM/joint) and server-first (breaks the
+   local-first promise for the common case).
+
+3. **Coupling = build 5a single + 5b cooperative; 5c joint stays roadmap.** Build
+   5a (single-method) then 5b (cooperative, sequential **job DAG** on doc 04's queue,
+   reference/structure coupling, reuses 5a engines). 5b delivers most of the
+   multi-method payoff (the platform's unique co-registration asset) without a
+   shared-mesh joint solver. **5c joint (cross-gradient / PGI) stays a
+   validated-prerequisite roadmap item**, not built in this phase.

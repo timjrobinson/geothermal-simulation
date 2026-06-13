@@ -60,9 +60,16 @@
 
 ## 1. Storage tiers — the three stores
 
+> **This document is the authoritative API + storage contract** (the catalog
+> physical schema, the on-disk store layout, brick/slice/sample/query endpoints,
+> content-addressing, GC). Other docs (02 logical schema, 03 ingestion, 06 viewer,
+> 07 fusion, 09 drilling) **reference this doc** for those concerns; where this doc
+> and another disagree on a *physical* detail, this doc wins. Logical field
+> semantics remain owned by doc 02.
+
 | Tier | What | Tech | Why |
 |---|---|---|---|
-| **Catalog DB** | metadata, geometry index, provenance, layer defs, job state | **SQLite + SpatiaLite** (default) → PostgreSQL + PostGIS (hosted) | small, relational, spatially queryable, transactional |
+| **Catalog DB** | metadata, geometry index, provenance, layer defs, job state | **PostgreSQL + PostGIS** (the choice) — SQLite+SpatiaLite optional lightweight fallback | relational, spatially queryable, transactional, concurrent |
 | **Array store** | bulk N-D arrays + 2D rasters + meshes + vectors + point clouds | **Zarr** (3D/4D), **COG** (2D), glTF/VTK (mesh), GeoJSON (vector), LAZ/3D-Tiles (points) | chunked, lazy, web-streamable, format-appropriate |
 | **Raw store** | original survey files, verbatim | filesystem, content-addressed | provenance, re-ingest, audit (`OVERVIEW.md` §5) |
 
@@ -75,29 +82,28 @@ memory-mappable / range-servable.
 
 ## 2. Catalog DB
 
-### 2.1 Engine choice — SQLite+SpatiaLite default, PG+PostGIS growth path
+### 2.1 Engine choice — PostgreSQL + PostGIS (the choice)
 
-| | **SQLite + SpatiaLite** *(default)* | **PostgreSQL + PostGIS** *(growth)* |
+| | **PostgreSQL + PostGIS** *(the choice)* | **SQLite + SpatiaLite** *(optional fallback)* |
 |---|---|---|
-| Setup | zero — a file in the project dir | a service to run |
-| Concurrency | single-writer (fine: single-user) | many writers |
-| Spatial | R-Tree + SpatiaLite functions | full GiST + rich GIS |
-| JSON | `JSON1` (good enough) | `jsonb` (richer) |
-| Fit | **local-first MVP** | hosted/multi-user later |
+| Setup | a service to run (Docker/local) | zero — a file in the project dir |
+| Concurrency | many writers; survives parallel RQ ingest | single-writer |
+| Spatial | full GiST + rich 3D GIS (`box3d`, `geometry(...,3D)`) | R-Tree + SpatiaLite functions |
+| JSON | `jsonb` (indexable, rich) | `JSON1` (basic) |
+| Fit | **the primary engine, from the start** | embedded demo / portability only |
 
-**Decision:** ship **SQLite + SpatiaLite**. It's a single file (`catalog.sqlite`)
-living *inside the project directory* (§3), so a project is a self-contained,
-copyable, zippable folder — exactly the local-first contract. Access via
-**SQLAlchemy** with a thin spatial helper layer so the **PostGIS swap is a
-connection-string + dialect change**, not a rewrite. We deliberately avoid
-SpatiaLite-only SQL in app code; bbox indexing uses the portable R-Tree pattern
-below.
+**Decision:** ship **PostgreSQL + PostGIS from the start** (`DECISIONS.md` doc-04).
+It is the catalog engine for both local-first and hosted use — chosen because RQ
+workers (§9.4) ingest in parallel and need a real multi-writer transactional store
+with a GiST 3D bbox index. One Postgres **schema (or database) per project** holds
+that project's catalog rows; the project *directory* (§3) holds only the bulk
+array/raw/cache stores. Access via **SQLAlchemy** with a thin spatial helper layer.
 
-> **Portability rule:** all schema DDL and queries target the SQLAlchemy core /
-> the intersection of SQLite and PG semantics. Geometry columns use WKB + an
-> explicit bbox-index table (§2.4) rather than engine-specific spatial types in
-> hot paths, so the same code runs on both. SpatiaLite/PostGIS functions are used
-> only for richer offline analysis, behind a capability flag.
+> **Portability note:** all schema DDL and hot-path queries target SQLAlchemy core
+> over the intersection of PG and SQLite semantics, and bbox indexing uses the
+> portable index pattern in §2.5, so an embedded **SQLite + SpatiaLite** build
+> remains an optional lightweight fallback (single-file demo / no-service path) —
+> not the default. PostGIS-specific SQL is confined behind a capability flag.
 
 ### 2.2 Bounding boxes are in **Engineering metres** (doc 01)
 
@@ -107,7 +113,36 @@ Engineering frame), and it's anchor-independent so georeferencing a project neve
 rewrites the index. A *derived* lat/lon bbox can be computed on demand from the
 `SpatialFrame` for map-extent display.
 
-### 2.3 Schema
+### 2.3 Logical (doc 02) → Physical (this doc) mapping table
+
+Doc 02 §2 owns the **logical `Dataset`**; this table pins every required logical
+field to its **physical home** (a column, a JSONB path, or a derived value), so the
+two docs cannot drift. `meta_json` is the open `methodData`/`attributes` blob.
+
+| doc-02 `Dataset` field | doc-02 req | Physical home (this doc) |
+|---|---|---|
+| `id` | ✓ | `datasets.id` (TEXT ULID PK) |
+| `projectId` | ✓ | `datasets.project_id` FK |
+| `name` | ✓ | `datasets.name` |
+| `kind` | ✓ | `datasets.kind` (`observation\|propertyModel\|feature\|fusedModel`) |
+| `method` | ✓ | `datasets.method` (canonical MethodKey) |
+| `submethod` | optional | `datasets.submethod` (canonical subtype, doc 02 §2) |
+| `extent` (Aabb) | ✓ | `datasets.extent_json` (Engineering m) **+** GiST/R-Tree bbox index (§2.5) |
+| `time` (TimeAxis) | optional | `datasets.time_extent_json` (null ⇒ static) |
+| `spatialFrameId` | ✓ | `datasets.spatial_frame_id` FK → `spatial_frame.project_id` |
+| `originCrs` | optional | `datasets.origin_crs` (mirror of provenance roots) |
+| `provenanceId` | ✓ | `datasets.provenance_id` FK → `provenance.id` (**NOT NULL**) |
+| `version` (VersionInfo) | ✓ | `datasets.version_root_id` / `version_seq` / `version_parent_id` (doc 02 §9) |
+| `tags` | ✓ | `datasets.tags_json` (string[]) |
+| `createdAt` | ✓ | `datasets.created_at` (epoch-ms) |
+| `createdBy` | ✓ | `datasets.created_by` |
+| `payload` | ✓ | the typed child row: `property_models` / `observations` / `features` / `fused_models`(+`fused_layers`), joined on `dataset_id` |
+
+> The four `payload` kinds become the four typed child tables below; `meta_json` /
+> `props_json` / `style_json` carry doc 02's open `methodData` / `attributes` /
+> `display` blobs verbatim (no schema owed — the R&D-plugin requirement).
+
+### 2.4 Schema
 
 ID convention: `TEXT` **ULID** (time-ordered, sortable, kind-prefixed per doc 02 §1:
 `ds_ pm_ obs_ feat_ fem_ ...`) PKs. `created_at`/
@@ -150,14 +185,26 @@ CREATE TABLE datasets (
   id            TEXT PRIMARY KEY,
   project_id    TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
   name          TEXT NOT NULL,
-  method        TEXT NOT NULL,        -- 'gravity'|'ert'|'mt'|'seismic'|'insar'|... (OVERVIEW §3)
+  method        TEXT NOT NULL,        -- canonical MethodKey (doc 02 §2): 'gravity'|'ert'|'mt'|'seismic'|'insar'|...
+  submethod     TEXT,                 -- canonical subtype under method (doc 02 §2), e.g. 'reflection'
   kind          TEXT NOT NULL,        -- 'observation'|'propertyModel'|'feature'|'fusedModel' (doc 02 §2)
   status        TEXT NOT NULL,        -- 'ingesting'|'ready'|'error'
-  time_extent_json TEXT,              -- {t0,t1,n} for 4D, null for static
+  extent_json   TEXT NOT NULL,        -- {xmin..zmax} Engineering m — doc-02 Dataset.extent (spatial index source §2.5)
+  time_extent_json TEXT,              -- {t0,t1,n} for 4D, null for static (doc-02 Dataset.time)
+  spatial_frame_id TEXT NOT NULL REFERENCES spatial_frame(project_id),  -- doc-01 frame this is expressed in (doc 02)
+  origin_crs    TEXT,                 -- CRS source arrived in, pre-reprojection (mirror of provenance)
+  provenance_id TEXT NOT NULL REFERENCES provenance(id),  -- doc 02: EVERY dataset has exactly one provenance
+  version_root_id   TEXT NOT NULL,    -- doc-02 VersionInfo.rootId — stable identity across versions (§9 doc 02)
+  version_seq       INTEGER NOT NULL DEFAULT 1,  -- VersionInfo.seq
+  version_parent_id TEXT,             -- VersionInfo.parent (null for v1)
+  tags_json     TEXT,                 -- doc-02 Dataset.tags (string[])
   meta_json     TEXT,                 -- method-specific blob (doc 02 methodData/acquisition)
+  created_by    TEXT NOT NULL,        -- doc-02 Dataset.createdBy ('system:fusion'|'system:synthetic'|user)
   created_at    INTEGER NOT NULL,
   updated_at    INTEGER NOT NULL
 );
+-- NOTE: provenance_id is NOT NULL — there is no dataset without provenance (doc 02 §7).
+-- (provenance.id is created first within the same ingest/fusion transaction.)
 
 -- ─────────────────── property_models (3D/4D continuous fields) ───────────────────
 -- Catalog row + array pointer for a doc-02 PropertyModel. The doc-02 schema
@@ -181,6 +228,44 @@ CREATE TABLE property_models (
   uncertainty_uri TEXT,               -- sibling zarr array '<property>_sigma' (doc 02 §6)
   created_at    INTEGER NOT NULL,
   updated_at    INTEGER NOT NULL
+);
+
+-- ─────────────────── fused_models (the FusedEarthModel CONTAINER grid) ───────────────────
+-- doc 02 §11: a FusedEarthModel is NOT a property_models row — it is a CONTAINER
+-- (a regular-voxel grid + a TimeAxis) into which native PropertyModels are
+-- RESAMPLED as referenced layers (fused_layers). The grid itself carries no single
+-- property. (A FAVORABILITY volume is, by contrast, an ordinary property_models row
+-- with property='favorability' — not modelled here.) A project may hold several.
+CREATE TABLE fused_models (
+  id            TEXT PRIMARY KEY,     -- 'fem_...'
+  dataset_id    TEXT NOT NULL REFERENCES datasets(id) ON DELETE CASCADE,  -- kind='fusedModel'
+  project_id    TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  grid_type     TEXT NOT NULL DEFAULT 'regular_voxel',  -- doc 02 §11 (default)
+  store_uri     TEXT NOT NULL,        -- relative path to the fused .zarr group (one array per layer + sigma)
+  store_format  TEXT NOT NULL DEFAULT 'zarr',
+  shape_json    TEXT NOT NULL,        -- [nz,ny,nx] or [nt,nz,ny,nx] — the VolumeSupport (doc 02 §4)
+  spacing_json  TEXT NOT NULL,        -- voxel size m
+  origin_json   TEXT NOT NULL,        -- grid origin, Engineering m
+  bbox_json     TEXT NOT NULL,        -- {xmin..zmax} Engineering m (index source)
+  has_time      INTEGER NOT NULL DEFAULT 0,
+  time_extent_json TEXT,              -- TimeAxis if any resampled layer is 4D (doc 02 §11)
+  pyramid_levels INTEGER NOT NULL DEFAULT 1,
+  created_at    INTEGER NOT NULL,
+  updated_at    INTEGER NOT NULL
+);
+
+-- ── fused_layers: each native PropertyModel resampled INTO the fused grid (doc 02 §11) ──
+-- Originals are NEVER overwritten — a layer references its source pm id + pinned version.
+CREATE TABLE fused_layers (
+  id                       TEXT PRIMARY KEY,  -- layerId
+  fused_model_id           TEXT NOT NULL REFERENCES fused_models(id) ON DELETE CASCADE,
+  source_property_model_id TEXT NOT NULL REFERENCES property_models(id),  -- native original (read-only)
+  source_version           TEXT NOT NULL,     -- pinned doc-02 version resampled from (provenance)
+  property                 TEXT NOT NULL,     -- PropertyTypeKey of this layer (doc 01 §5 registry)
+  resample_op_json         TEXT NOT NULL,     -- {method:'trilinear'|'nearest'|'conservative'|'kriging'|'idw', params} (doc 07)
+  sigma_array              TEXT,              -- path to resampled 1σ inside the fused Zarr group (doc 02 §11)
+  valid_mask               TEXT,              -- path to coverage mask: which cells this layer informs
+  created_at    INTEGER NOT NULL
 );
 
 -- ─────────────────── observations (raw measured survey data) ───────────────────
@@ -282,7 +367,7 @@ CREATE TABLE views (
 CREATE TABLE jobs (
   id            TEXT PRIMARY KEY,
   project_id    TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
-  kind          TEXT NOT NULL,        -- 'ingest'|'fuse'|'isosurface'|'transform'|'pyramid'|'export'
+  kind          TEXT NOT NULL,        -- 'ingest'|'fuse'|'isosurface'|'transform'|'pyramid'|'export'|'import'|'gc'
   status        TEXT NOT NULL,        -- 'queued'|'running'|'succeeded'|'failed'|'cancelled'
   progress      REAL NOT NULL DEFAULT 0,  -- 0..1
   message       TEXT,                 -- latest human-readable status
@@ -295,46 +380,51 @@ CREATE TABLE jobs (
 );
 ```
 
-### 2.4 Spatial indexing of bounding boxes (portable)
+### 2.5 Spatial indexing of bounding boxes (portable)
 
 Hot-path spatial queries ("which artifacts intersect this clip box / this
-slice?") use an **R-Tree index** that works identically on both engines:
+slice?") use a 3D bbox index. On the primary engine this is a **PostGIS GiST
+index** on a `box3d` / `geometry(...,3D)` column built from `extent_json`; the
+portable bbox-table pattern below is the SQLite-fallback mirror so the same
+SQLAlchemy code path runs on both:
 
 ```sql
--- SQLite R-Tree virtual table (mirrors PostGIS GiST on the same bbox).
+-- Portable bbox index (PostGIS GiST primary; SQLite R-Tree virtual table mirror).
 CREATE VIRTUAL TABLE artifact_rtree USING rtree(
   rowid,                 -- maps to artifact via artifact_rtree_map
   xmin, xmax, ymin, ymax, zmin, zmax   -- Engineering metres
 );
 CREATE TABLE artifact_rtree_map (
   rowid INTEGER PRIMARY KEY,
-  kind  TEXT NOT NULL,   -- 'propertyModel'|'feature'|'observation' (doc 02 §2 kinds)
+  kind  TEXT NOT NULL,   -- 'propertyModel'|'feature'|'observation'|'fusedModel' (doc 02 §2 kinds)
   id    TEXT NOT NULL
 );
 ```
 
-A bbox-intersection query reads `artifact_rtree`, joins the map, then the typed
-table. On PostgreSQL the same logical query is a GiST index on a `box3d` /
-`geometry(...,3D)` column; the SQLAlchemy spatial helper picks the backend.
-3D bbox (incl. `zmin/zmax`) so depth-clipping the scene also prunes candidates.
+On PostgreSQL a bbox-intersection query hits the GiST 3D index directly; on the
+SQLite fallback it reads `artifact_rtree`, joins the map, then the typed table.
+The SQLAlchemy spatial helper picks the backend. The 3D bbox (incl. `zmin/zmax`)
+means depth-clipping the scene also prunes candidates.
 
 ---
 
 ## 3. On-disk project layout
 
-A **project is a self-contained directory** — the catalog DB plus all stores
-nested under it, so it copies/zips/backs-up as one unit (local-first contract).
+The **project directory holds the bulk stores** (`arrays/ grids/ meshes/ vectors/
+points/ raw/ cache/`); the **catalog lives in PostgreSQL** (one schema/DB per
+project, §2.1), *not* in a file under this directory. The directory + a `pg_dump`
+of the project's catalog rows together form the portable **project bundle** (§3.1)
+— that bundle, not "copy one folder," is the copy/share/backup unit.
 
 ```
-<storage_root>/<project_id>/
-├── catalog.sqlite                 # the catalog DB (§2)
+<storage_root>/<project_id>/        # bulk stores only — catalog is in PostgreSQL (§2.1)
 ├── frame.json                     # cached SpatialFrame (doc 01), DB is canonical
 ├── arrays/                        # Zarr volumes (property models + fused)
-│   ├── pm_<id>.zarr/              #   one zarr group per property model
-│   │   ├── zarr.json              #     v3 group metadata
-│   │   ├── 0/  1/  2/ ...         #     pyramid levels (§5); 0 = full res
-│   │   └── <property>_sigma/      #     co-registered 1σ sibling array (doc 02 §6)
-│   └── fused_<id>.zarr/           #   fused/derived volumes — SAME layout (§7)
+│   ├── pm_<id>.zarr/              #   one zarr group per property model — layout owned by doc 02 §10.2
+│   │   ├── zarr.json              #     v3 group metadata (multiscales spec, frame ref)
+│   │   ├── <property>/0/ 1/ 2/ ...#     per-property multiscale subgroup; 0 = full res (doc 02 §10.2)
+│   │   └── <property>_sigma/      #     co-registered 1σ sibling array (doc 02 §6, §10.2)
+│   └── fem_<id>.zarr/             #   fused-model volumes — SAME layout (§7), doc 02 §10.2
 ├── grids/                         # 2D rasters → COG
 │   └── g_<id>.tif                 #   surface grids, anomaly maps, InSAR scenes
 ├── meshes/                        # surfaces & solids
@@ -361,33 +451,66 @@ nested under it, so it copies/zips/backs-up as one unit (local-first contract).
 | Point clouds (microseismic) | **LAZ** small; **3D Tiles** when large | 4D via time attribute → time-filtered fetch |
 | Raw originals | as-uploaded | content-addressed, never mutated |
 
+### 3.1 Export / Import — the project bundle
+
+Because the catalog now lives in PostgreSQL (not in a file inside the project
+dir), "copy/share/backup a project" is **not** "zip one folder." A **project
+bundle** is the two halves packaged together:
+
+```
+<project_id>.bundle/   (or a .tar/.zip of it)
+├── stores/            # the project directory: arrays/ grids/ meshes/ vectors/ points/ raw/ cache?/
+│                      #   (cache/ is omitted by default — fully derivable, §8)
+├── catalog.sql        # pg_dump of THIS project's catalog rows (its schema/DB, §2.1)
+└── bundle.json        # manifest: project_id, schema/format version, content hashes, created_at
+```
+
+- **Export:** `pg_dump` the project's catalog schema/rows → `catalog.sql`, copy
+  the bulk `stores/` (skip `cache/`), write `bundle.json` (records the array/raw
+  content hashes from §8.1 for integrity). Exposed as an `export` job (§9.4) →
+  `GET /projects/{pid}/export` streams the bundle.
+- **Import:** `pg_restore`/`psql` `catalog.sql` into a fresh per-project schema,
+  drop the bulk `stores/` under a new `<storage_root>/<project_id>/`,
+  rewrite `projects.storage_root`, verify content hashes. Exposed as
+  `POST /projects:import` (multipart bundle) → `{job_id}`.
+- **Copy / share / backup** all go through this bundle. A backup is a periodic
+  bundle export; sharing is sending the bundle; "duplicate project" is
+  export-then-import with a new `project_id`. The bulk halves are
+  content-addressed (§8.1), so de-dup and incremental backup are natural.
+
 ---
 
 ## 4. Zarr volume store (the core bulk format)
 
-Authoritative Zarr/array conventions belong to **doc 02**; this section pins the
-**storage + serving** details the viewer depends on.
+### 4.1 Group/array structure — **owned by doc 02 §10.2**
 
-### 4.1 Group/array structure (Zarr v3)
+The on-disk Zarr group layout is **authoritatively specified in doc 02 §10.2** —
+this doc does **not** restate a different layout. The older doc-04 sketch
+(`pm_<id>.zarr/0/1/2/...`) is **superseded** by doc 02 §10.2 and removed.
+
+Per doc 02 §10.2, a PropertyModel (or fused model) is **one Zarr v3 sharded
+group** whose members are **per-property multiscale subgroups**; the canonical
+on-disk path to a chunk is:
 
 ```
-pm_<id>.zarr/                       # a zarr GROUP = one property model
-  zarr.json                         # group metadata (multiscale spec, units, frame ref)
-  0/                                # level 0 = full resolution ARRAY
-    zarr.json                       #   array meta: shape, chunks, dtype, codecs
-    c/0/0/0   c/0/0/1   ...         #   chunk objects (one file per chunk)
-  1/  2/  ...                       # coarser pyramid levels (§5)
-  <property>_sigma/                 # co-registered 1σ multiscale array, variance-correct downsample (doc 02 §6, §10.3)
+<datasetId>.zarr/<property>/<level>/c/<bz>/<by>/<bx>
 ```
 
-- **Axis order:** `[z, y, x]` (3D) or `[t, z, y, x]` (4D), C-order, matching the
-  Engineering ENU frame (doc 01). Grid origin + spacing live in `zarr.json`
-  attrs **in Engineering metres** (never CRS coords — doc 01 #2).
-- **dtype:** `float32` canonical for rendering (GPU 3D-texture native). `int16`/
-  `uint8` allowed for quantized/labelled volumes; transfer fn handles scaling.
-- **multiscale metadata:** OME-Zarr-style `multiscales` block in group attrs
-  listing levels + their downsample factors, so any Zarr reader (Python xarray
-  *and* the JS client) discovers the pyramid the same way.
+with sibling arrays `<property>_sigma` (1σ), `<property>_classes` (categorical
+probabilities), and `<property>_doi` (DOI surface), all per doc 02 §10.2. The
+key conventions this doc's storage + serving rely on — all defined there:
+
+- **Axis order** `[z,y,x]` (3D) / `[t,z,y,x]` (4D), Z-up, x fastest (doc 02 §10.2).
+- **`origin` + `spacing` in array attrs, Engineering metres, REQUIRED** for regular
+  grids (never CRS coords — doc 01 #2); explicit CF coord arrays only for irregular.
+- **`fill_value` = NaN**; masked/outside-DOI cells are NaN, never 0.
+- **OME-Zarr `multiscales`** block per property subgroup describes the pyramid so
+  any Zarr reader (Python xarray *and* the JS client) discovers levels the same way.
+- **dtype:** `float32` canonical for rendering; `int`/`uint` for hard-label
+  categorical arrays (with a `categories` attr table, doc 02 §10.2).
+
+This doc's brick addressing (§6) maps **1:1** onto the doc-02 chunk path
+`<property>/<level>/c/<bz>/<by>/<bx>`.
 
 ### 4.2 Chunking strategy — chunks **are** bricks
 
@@ -441,20 +564,22 @@ the client contract.
 
 ## 6. Brick / tile addressing scheme
 
-A brick is addressed by **`(artifact_id, level, t, bz, by, bx)`**:
+A brick is addressed by **`(artifact_id, property, level, t, bz, by, bx)`**:
 
 | Field | Meaning |
 |---|---|
-| `artifact_id` | property-model / fused id |
+| `artifact_id` | property-model / fused-model dataset id (`<datasetId>.zarr`) |
+| `property` | the property subgroup name (doc 02 §10.2) — e.g. `resistivity`, `resistivity_sigma` |
 | `level` | pyramid level (0 = finest) |
 | `t` | time index (0 for static) |
 | `bz,by,bx` | chunk/brick indices within that level |
 
-This is exactly a Zarr chunk key, so **brick address == Zarr chunk path** — the
-server can serve it by mapping the URL straight to a chunk object (or proxy the
-chunk store). It is also octree-compatible: a node `(level, bz,by,bx)` has
-children `(level-1, 2b{x,y,z}+{0,1})`, so a future sparse octree reuses the same
-URLs.
+This maps **1:1 onto the doc-02 §10.2 chunk path
+`<property>/<level>/c/<bz>/<by>/<bx>`** inside `<datasetId>.zarr` — so **brick
+address == Zarr chunk path** and the server serves a brick by mapping the URL
+straight to a chunk object (or proxying the chunk store). It is also
+octree-compatible: a node `(level, bz,by,bx)` has children
+`(level-1, 2b{x,y,z}+{0,1})`, so a future sparse octree reuses the same URLs.
 
 **LOD flow (viewer ↔ server):**
 1. Viewer fetches group metadata → learns shape, chunks, levels, stats, frame.
@@ -471,19 +596,29 @@ the **addressing + transport contract** that makes it possible.
 
 ## 7. Derived / fused volumes — stored & served identically
 
-A fused or transform-derived volume (`OVERVIEW.md` §6 L1–L3; resample-to-fused,
-rock-physics outputs, favorability, uncertainty) is written as a **`fused_<id>.zarr`
-group with the identical layout** (§4–5): same chunking, compression, pyramids,
-multiscale metadata. It gets:
-- a `datasets` row with `kind='fusedModel'` (doc 02 §2; a project may hold several),
-- a `property_models` row (it *is* a property model in catalog terms),
+Two distinct things get the identical Zarr layout (§4–5) and serving path, and
+must not be conflated (doc 02 §11):
+
+**(a) A `FusedEarthModel` — a CONTAINER grid, *not* a property model.** It is a
+regular-voxel grid into which native PropertyModels are **resampled as referenced
+layers**; the grid carries no single property. It is written as an
+`fem_<id>.zarr` group (one array per layer + sigma, doc 02 §10.2) and gets:
+- a `datasets` row with `kind='fusedModel'` (a project may hold several),
+- a **`fused_models`** row (the container grid/time) **+ one `fused_layers` row
+  per resampled native property** (§2.4) — *not* a `property_models` row,
 - a `provenance` record linking it to its input artifacts (the fusion DAG),
 - pyramids built by the same `pyramid` job.
 
+**(b) A favorability / rock-physics derived volume — an ordinary PropertyModel.**
+A favorability volume (`OVERVIEW.md` §6) is a single-property field, so it is an
+ordinary **`property_models`** row (`property='favorability'`) with its own Zarr
+group — exactly like any ingested volume — even when it was computed *from* a
+fused grid. The fused grid is the container; a favorability volume is a product.
+
 **Consequence:** the **same `/bricks`, `/slice`, `/sample`, `/isosurface`
-endpoints serve fused volumes** with zero special-casing. The `FusedEarthModel`
-(doc 02 §11: regular-voxel grid, native models resampled in as referenced layers;
-a project may hold more than one) is just another Zarr volume to storage & serving.
+endpoints serve fused-model layers and favorability volumes alike** with zero
+special-casing — each layer/array is just a `<property>` subgroup (doc 02 §10.2)
+in a Zarr volume. Storage & serving stay uniform; only the catalog rows differ.
 
 ---
 
@@ -504,6 +639,34 @@ a project may hold more than one) is just another Zarr volume to storage & servi
   recompute. Never holds source-of-truth.
 - Slices/isosurfaces are computed on first request and memoized; this is why the
   same endpoint shape works whether the result is cached or freshly computed.
+
+### 8.1 Content-addressing & garbage collection
+
+"**Keep all versions cheaply**" (`DECISIONS.md`; doc 02 §9) rests on a precise
+content-addressing scheme — versions share unchanged bytes instead of copying:
+
+| Object | Address | Immutability |
+|---|---|---|
+| **Raw file** | whole-file **sha256** → `raw/<sha256>/<name>` (§3) | immutable; re-upload of identical bytes de-dups |
+| **Zarr chunk** | content hash of the chunk object, exposed as its **ETag** | immutable; written once, never mutated in place |
+| **Artifact version** | a **manifest hash** = hash over (array/group metadata + the ordered list of its chunk **content references**) | a version *is* its manifest hash; identical content ⇒ identical hash |
+
+- **Versioning is structural sharing.** A new version (re-fuse, edit, re-anchor,
+  doc 02 §9) writes only the chunks whose content changed and a **new manifest**
+  referencing both new and unchanged chunks. Unchanged chunks are referenced, not
+  duplicated — so "keep all versions" costs only the delta, not a full copy.
+- **Chunks are immutable + content-ETagged**, which is exactly what makes the §8
+  HTTP caching (`Cache-Control: immutable`) and the S3+CDN path (§10) safe.
+- **Garbage collection = mark-and-sweep from the catalog.** *Mark:* walk every
+  live `datasets`/`property_models`/`fused_models`/`fused_layers`/`raw_files` row
+  (and every retained version) and collect the manifest hashes + chunk + raw
+  `sha256` references they reach. *Sweep:* any chunk object or `raw/<sha256>/`
+  file **not** in the live set is unreferenced and deletable. This is the concrete
+  mechanism doc 02 §9.5 delegates here ("deletable when no live version
+  references its `sha256`"). GC runs as a `gc` job (§9.4); `cache/` is exempt
+  (fully derivable, deleted freely).
+- **A bundle export (§3.1)** records these content hashes in `bundle.json`, so
+  import can verify integrity and de-dup against an existing store.
 
 ---
 
@@ -532,6 +695,8 @@ POST   /projects                         {name, frame?} → Project   (creates d
 GET    /projects/{pid}                   → Project (incl. SpatialFrame)
 PATCH  /projects/{pid}                   {name?, frame?}            (frame edit = doc 01 georeference)
 DELETE /projects/{pid}
+GET    /projects/{pid}/export            → project bundle (stores/ + pg_dump catalog.sql, §3.1)  [async: {job_id}]
+POST   /projects:import                  (multipart bundle)  → {job_id} → Project              (§3.1)
 
 # ── Datasets / upload / ingest ───────────────────────────
 GET    /projects/{pid}/datasets          → [Dataset]
@@ -542,7 +707,7 @@ DELETE /datasets/{did}
 
 # ── Artifact catalog / discovery ─────────────────────────
 GET    /projects/{pid}/artifacts?bbox=&kind=&method=&property=&t=   → [ArtifactSummary]
-                                          (bbox in Engineering m → R-Tree query §2.4)
+                                          (bbox in Engineering m → GiST/R-Tree query §2.5)
 GET    /property-models/{id}              → PropertyModel meta (shape,levels,stats,frame)
 GET    /features/{id}                     → Feature meta
 GET    /observations/{id}                 → Observation meta (+inline or values_uri)
@@ -551,8 +716,9 @@ GET    /observations/{id}                 → Observation meta (+inline or value
 GET    /property-models/{id}/zarr/{path}  → raw Zarr object (group/array meta or chunk)
           # Zarr-over-HTTP: the JS Zarr client reads the store directly.
           # supports If-None-Match / Range; Cache-Control: immutable for chunks.
-GET    /property-models/{id}/bricks/{level}/{t}/{bz}/{by}/{bx}  → brick bytes (+headers §6)
-          # convenience alias resolving to the same chunk object.
+GET    /property-models/{id}/bricks/{property}/{level}/{t}/{bz}/{by}/{bx}  → brick bytes (+headers §6)
+          # convenience alias resolving to the doc-02 §10.2 chunk path
+          # <property>/<level>/c/<bz>/<by>/<bx>. Fused models: GET /fused-models/{id}/bricks/...
 
 # ── Slices (arbitrary plane) ─────────────────────────────
 POST   /property-models/{id}/slice        SliceRequest  → SliceResponse (PNG|raw f32|npy)
@@ -601,28 +767,35 @@ SliceResponse {                       // (body is the image/array; this is the J
   "data_uri": "/cache/slices/<hash>.bin"   // or inline base64 for small
 }
 
-// ── SampleRequest ── value at point(s) or along a line (OVERVIEW §6 L2)
+// ── SampleRequest ── value at point(s), along a straight line, or along a CURVED PATH (OVERVIEW §6 L2)
 SampleRequest {
-  "mode": "points" | "line",
+  "mode": "points" | "line" | "path",
   "points": [[x,y,z], ...],           // points mode
-  "line":   {"from":[x,y,z],"to":[x,y,z],"n":200},  // line mode (e.g. along a well)
+  "line":   {"from":[x,y,z],"to":[x,y,z],"n":200},  // line mode (straight segment)
+  // path mode: a POLYLINE / curved trajectory — e.g. a deviation-survey well path (doc 09).
+  // Sampled piecewise along the vertices; this is what the well planner uses to read a
+  // predicted log along a deviated borehole (NOT just a straight from→to).
+  "path":   {"vertices":[[x,y,z], ...], "n": 500, "spacing": null} | null,
+  //   vertices = Engineering-m polyline; sample N points evenly by arc-length (or fixed `spacing` m).
   "level": 0, "t": 0,
-  "interp": "nearest" | "trilinear"
+  "interp": "nearest" | "trilinear",
+  "withUncertainty": false            // true ⇒ include co-registered 1σ in the response
 }
 SampleResponse {
   "property": "resistivity", "unit": "ohm.m",
   "values": [12.3, 14.1, ...],        // null where outside volume
   "sigma":  [2.1, 2.4, ...] | null,   // co-registered 1σ (doc 02 §6) when requested & available
-  "positions": [[x,y,z], ...]         // echoes (esp. for line mode)
+  "positions": [[x,y,z], ...],        // echoes the sampled XYZ (esp. for line/path mode)
+  "distance":  [0.0, 12.5, ...] | null // cumulative arc-length m along line/path (well-log MD axis, doc 09)
 }
 // SampleRequest/MultiSampleRequest accept "withUncertainty": true to include sigma
-// (doc 09's well-planner needs value + uncertainty along the trajectory).
+// (doc 09's well-planner needs value + uncertainty along the curved trajectory).
 
 // ── MultiSampleRequest ── sample SEVERAL volumes at shared points → cross-plot (L2)
 MultiSampleRequest {
   "property_model_ids": ["pm_a","pm_b"],
-  "mode": "points"|"line", "points":[...] | "line":{...},
-  "level": 0, "t": 0, "interp": "trilinear"
+  "mode": "points"|"line"|"path", "points":[...] | "line":{...} | "path":{vertices:[...],n},
+  "level": 0, "t": 0, "interp": "trilinear", "withUncertainty": false
 }
 // → { "samples": [ {id, property, unit, values[], sigma?[]}, ... ], "positions":[...] }
 
@@ -639,25 +812,27 @@ IsoRequest {
 
 ### 9.4 Job / async model
 
-**Sync-first, escalate to a queue** (`OVERVIEW.md` §5 "background tasks first;
-Celery/RQ when needed"):
+**Inline for fast ops; an RQ + Redis worker queue for everything else, from the
+start** (`DECISIONS.md` doc-04):
 
 | Tier | Mechanism | When |
 |---|---|---|
 | **Inline** | compute in the request | fast ops: small slice, point sample, small isosurface |
-| **BackgroundTasks** *(default for jobs)* | FastAPI `BackgroundTasks` + a `jobs` row + WS progress | ingest, fusion, pyramid build, big isosurface — single-user, one box |
-| **RQ (Redis Queue)** *(growth)* | external worker pool, same `jobs` table | multi-user / parallel / crash-isolation; survives API restart |
+| **RQ + Redis** *(the choice)* | external RQ worker pool against Redis, writing the `jobs` table | ingest, fusion, pyramid build, big isosurface, export/import, GC — parallel, crash-isolated, survives API restart |
+| **BackgroundTasks** *(lightweight fallback)* | FastAPI `BackgroundTasks` + a `jobs` row + WS progress | only the no-service embedded build (paired with the SQLite fallback, §2.1) |
 
-**Decision:** default to **FastAPI BackgroundTasks** backed by the `jobs` table
-(so a job survives a page reload — the client reconnects to `/jobs/{jid}/progress`
-or polls `GET /jobs/{jid}`). Escalate to **RQ over Celery** when we need real
-worker isolation/parallelism — **RQ** because it's lighter-weight and Redis-only,
-matching local-first; Celery only if routing/scheduling complexity demands it.
-Either way the **job contract (table + endpoints + WS) is identical**, so the
-escalation is an executor swap behind `JobRunner`, not an API change.
+**Decision:** run **RQ + Redis workers from day one** as the async tier (user
+decision) — chosen over Celery because it's lighter-weight and Redis-only
+(matching local-first), and over BackgroundTasks because parallel RQ ingest needs
+real crash-isolation and survives an API restart. The `jobs` row is the durable
+source of truth, so a job survives a page reload (the client reconnects to
+`/jobs/{jid}/progress` or polls `GET /jobs/{jid}`). **FastAPI BackgroundTasks
+remains a documented lightweight fallback** for the embedded no-service build
+only. The **job contract (table + endpoints + WS) is identical** across both, so
+the executor is a swap behind `JobRunner`, not an API change.
 
-**Job pattern:** `POST ...:ingest` → create `jobs` row (`queued`) → enqueue →
-return `{job_id}` immediately → worker updates `progress`/`message` and pushes
+**Job pattern:** `POST ...:ingest` → create `jobs` row (`queued`) → enqueue on RQ
+→ return `{job_id}` immediately → worker updates `progress`/`message` and pushes
 over WS → on success writes artifact rows + `result_json` → client refetches.
 
 ---
@@ -668,10 +843,13 @@ The local-first design upgrades without an API rewrite:
 
 | Local-first (now) | Hosted (later) | Trigger |
 |---|---|---|
-| SQLite + SpatiaLite | PostgreSQL + PostGIS | multi-user / concurrent writes |
+| PostgreSQL + PostGIS (single instance) | managed/clustered Postgres | many concurrent users |
+| RQ workers + Redis (local) | RQ workers + managed Redis, more workers | parallel/isolated jobs at scale |
 | Filesystem stores | S3-compatible object store (Zarr/COG are object-native) | shared/remote access |
-| BackgroundTasks | RQ workers + Redis | parallel/isolated jobs |
 | FastAPI serves chunks | CDN in front of object store (chunks are immutable) | scale-out reads |
+
+(PostgreSQL+PostGIS and RQ+Redis are the engines **from the start** — see §2.1,
+§9.4; the hosted path scales them rather than swapping them in.)
 
 Because Zarr/COG are **object-store-native and HTTP-range-served**, and chunks
 are immutable & content-addressed, moving bulk bytes to S3+CDN is a URL/driver
@@ -685,24 +863,30 @@ change, not a format change.
    via SQLAlchemy with a backend-portable spatial helper; **SQLite + SpatiaLite**
    remains the optional lightweight fallback. No engine-specific SQL in hot paths,
    so either engine runs the same code.
-2. **A project is a self-contained directory** (`catalog.sqlite` + `arrays/`,
-   `grids/`, `meshes/`, `vectors/`, `points/`, `raw/`, `cache/`) — copyable as one
-   unit.
+2. **Catalog in PostgreSQL; bulk in the project directory.** The project dir holds
+   only the bulk stores (`arrays/ grids/ meshes/ vectors/ points/ raw/ cache/`);
+   catalog rows live in a per-project Postgres schema. Copy/share/backup is the
+   **project bundle** = bulk `stores/` + a `pg_dump` of the catalog (§3.1), not
+   "copy one folder."
 3. **Bounding boxes / geometry indexed in Engineering metres** (doc 01), via a
-   portable **R-Tree** (SQLite) / GiST (PG) 3D bbox index — anchor-independent, so
-   georeferencing never rewrites the index.
+   **PostGIS GiST** 3D bbox index (portable R-Tree mirror on the SQLite fallback) —
+   anchor-independent, so georeferencing never rewrites the index.
 4. **3D/4D volumes = Zarr v3**, axis order `[t,]z,y,x`, **float32 canonical**,
    **64³ cubic chunks (= 1 MiB bricks)**, **Blosc+zstd+shuffle** lossless
    compression. **Chunk == GPU brick == addressable unit.**
 5. **Power-of-two multiresolution pyramid** per volume (mean downsample, built to
    a ~64³ thumbnail); LOD streams coarse→fine. Addressing is **octree-compatible**
-   (`(id, level, t, bz, by, bx)` == Zarr chunk path) so a sparse octree is a future
+   (`(id, property, level, t, bz, by, bx)` == doc 02 §10.2 chunk path
+   `<property>/<level>/c/<bz>/<by>/<bx>`) so a sparse octree is a future
    non-breaking upgrade.
 6. **Format per primitive:** Zarr (volumes) · COG (2D grids) · glTF/VTK (meshes) ·
    GeoJSON (vectors) · LAZ/3D-Tiles (point clouds) · verbatim content-addressed
    raw store. (`OVERVIEW.md` §5.)
-7. **Derived/fused volumes use the identical Zarr layout & endpoints** as ingested
-   ones — no special-casing in storage or serving.
+7. **Fused models vs derived volumes are modelled distinctly** (doc 02 §11): a
+   **`FusedEarthModel` is a container grid** (`fused_models` + `fused_layers`, §2.4,
+   §7), *not* a `property_models` row; a **favorability volume is an ordinary
+   PropertyModel**. Both use the **identical Zarr layout & endpoints** as ingested
+   volumes — no special-casing in storage or serving, only in the catalog rows.
 8. **REST + HTTP-range / Zarr-over-HTTP for all data** (bricks/slices/samples/
    queries — cacheable, parallel, CDN-able); **WebSocket only for job
    progress/cancel.**
@@ -710,9 +894,12 @@ change, not a format change.
    decision)* as the async tier (crash-isolation + parallel ingest), against the
    `jobs` table; FastAPI BackgroundTasks remains the documented lightweight
    fallback. Same job contract (table + endpoints + WS) throughout.
-10. **`cache/` is fully derivable & deletable;** served chunks are **immutable +
-    content-ETagged** (edits create new artifact ids), enabling aggressive HTTP
-    caching and a clean S3+CDN path.
+10. **Content-addressing + mark-and-sweep GC (§8.1):** raw files = whole-file
+    sha256; Zarr chunks = immutable content/ETag objects; an artifact version = a
+    manifest hash over metadata + chunk references; GC marks from live catalog
+    references and sweeps the rest. This is what makes **keep-all-versions cheap**
+    (unchanged bytes shared) and HTTP/S3+CDN caching safe. `cache/` is fully
+    derivable & deletable and exempt from GC.
 
 ### Resolved (was: open questions)
 
@@ -721,7 +908,8 @@ change, not a format change.
 - **Slice colour-mapping locus** → **raw-f32 to client** is the default (GPU transfer
   function, consistent with volume rendering); PNG is an export/thumbnail option.
 - **Artifact versioning depth** → **keep all versions** *(user decision)*; cheap via
-  content-addressed bulk sharing (doc 02 §9).
+  content-addressed bulk sharing + manifest-hash versions + mark-and-sweep GC
+  (§8.1; doc 02 §9).
 - **`[NEEDS-02]` confirmations** → all resolved against doc 02 (see the
   *Reconciliation with doc 02* banner above): `support`∈volume/grid2d/mesh;
   uncertainty = `<property>_sigma` sibling; `geometryKind`/`featureKind`

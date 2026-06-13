@@ -10,7 +10,7 @@
 > - Coordinates, MD/TVD/elevation, units, `SpatialFrame` — **doc 01** (locked).
 > - Property models, **features** (faults, units, fracture networks, well paths),
 >   provenance, on-disk schema — **doc 02**.
-> - **`sample_along_line` / `sample_at_points`** query, fused-grid storage, tile/slice API — **doc 04**.
+> - **`sample` query — `points` / `line` / `path`(polyline) modes** (doc 04 §9.3), fused-grid storage, tile/slice API — **doc 04**.
 > - **Viewer** scene graph, picking, gizmos, well-tube rendering — **doc 06**.
 > - **Favorability / temperature / uncertainty volumes** and rock-physics derivations — **doc 07**.
 >
@@ -19,9 +19,10 @@
 
 > ### ⚠️ Revision — user decisions applied (see `DECISIONS.md`)
 > - **Trajectory fidelity:** geometric (min-curvature + DLS) **plus a crude
->   drillability flag in core** — a lightweight build-rate / DLS-vs-feasibility
->   sanity check that warns on likely-undrillable geometry. Full torque-and-drag /
->   hydraulics / BHA mechanics remain a later `TrajectoryPlugin`.
+>   drillability flag in core** — an explicitly **non-engineering-grade pass/warn**
+>   check (§4.6) over DLS exceedance, build/turn rate, MD/TVD ratio, max inclination,
+>   and a lithology-hardness proxy. Full torque-and-drag / hydraulics / BHA mechanics
+>   remain a later `TrajectoryPlugin`.
 > - **Exports:** **CSV deviation survey + CSV predicted log + WITSML-trajectory**
 >   are the supported set (WITSML promoted into scope; Compass `.dev`/named-tool
 >   still deferred until a specific downstream tool is in the loop).
@@ -35,7 +36,7 @@
 **In scope.** A *geometric, model-driven* well planner:
 
 1. **Target definition** — pick a point/zone in the fused 3D model (typically a high-favorability hot fractured volume from doc 07), capture target metadata.
-2. **Trajectory model** — a planned wellbore as a deviation survey (MD/inc/azi); vertical, deviated, horizontal/EGS geometries; minimum-curvature math; dogleg-severity (DLS) constraints.
+2. **Trajectory model** — a planned wellbore as a deviation survey (MD/inc/azi); vertical, deviated, horizontal/EGS geometries; minimum-curvature math; dogleg-severity (DLS) constraints; a **crude drillability flag** (§4.6, non-engineering-grade pass/warn).
 3. **Model intersection** — sample every relevant volume along the trajectory → a **predicted log** of what the well will encounter.
 4. **Risk / uncertainty along path** — surface doc-07 uncertainty (temperature confidence, fault proximity, lost-circulation / hazard zones) into a simple per-station risk score.
 5. **Geothermal outputs** — predicted BHT, reservoir intersection length, expected productive fracture intersections.
@@ -67,7 +68,7 @@ Fidelity stance: **trajectory geometry is industry-standard (minimum curvature, 
    │  PLANNING DOMAIN (this doc)                                   │
    │  Target ── Trajectory(min-curv) ── Intersection ── Risk ──Export│
    └───────────────▲───────────────────────────┬──────────────────┘
-        viewer pick/gizmo (doc 06)   sample_along_line (doc 04)
+        viewer pick/gizmo (doc 06)   sample (path mode, doc 04)
 ```
 
 Planning objects are **features** (doc 02 primitive #3 — discrete vector geometry). A planned well is a first-class, persisted feature; a target is a small feature with metadata. They live in the project catalog alongside everything else and render through the normal feature path in the viewer. **A planned trajectory and an ingested real well path share the same deviation-survey representation** (doc 01 §4) — so a plan can later be promoted to "as-drilled" with zero schema change.
@@ -91,7 +92,7 @@ Three picking modes, all resolving to Engineering XYZ via doc-06 picking + doc-0
 2. **Click-in-volume + threshold grow** — click inside a volume; backend flood-fills the connected region above a threshold (reusing doc-04 sampling) and returns its centroid + bounding solid as a zone target.
 3. **Manual entry** — type/drag an Engineering XYZ (or lat/lon/elev, or MD/TVD against an existing well) for precise targets.
 
-The target is then **enriched** by a single `sample_at_points` call (doc 04) at the bullseye: temperature, favorability, lithology, key properties, and their uncertainties (doc 07) are stamped onto the target metadata at creation time.
+The target is then **enriched** by a single `sample` call in **`points` mode** (doc 04) at the bullseye: temperature, favorability, lithology, key properties, and their uncertainties (doc 07) are stamped onto the target metadata at creation time.
 
 ### 3.3 `DrillTarget` schema
 
@@ -239,6 +240,35 @@ Designers don't hand-type surveys; they state intent and a solver emits the surv
 
 The geometric survey is the input a torque-and-drag or hydraulics model needs. §11's `TrajectoryPlugin` interface exposes the resolved survey + predicted lithology log (§5) so a future plugin can compute side forces, T&D, ECD, etc. — **no change to the planning core**.
 
+### 4.6 Crude drillability flag (in core — explicitly NOT engineering-grade)
+
+A lightweight **pass / warn** gate that catches obviously-undrillable geometry early. It is **deliberately a sanity check, not a mechanics model**: it does **no torque-and-drag, no hydraulics/ECD, no BHA/buckling analysis** — those remain the later `TrajectoryPlugin` (§4.5, §11). It exists so the planner can say "this geometry looks impractical" without claiming engineering rigour.
+
+It combines five cheap, transparent checks (each emits `ok` / `warn`, with the offending MD interval):
+
+| Check | Rule | Source |
+|---|---|---|
+| **DLS exceedance** | max per-interval DLS vs `constraints.maxDLS_deg30m` | §4.3 (already computed) |
+| **Build/turn rate** | inclination- and azimuth-change rate per 30 m vs a configurable limit (`maxBuildRate_deg30m`, `maxTurnRate_deg30m`) | derived from survey |
+| **MD/TVD ratio** | total MD ÷ TVD vs a configurable ceiling (long step-out / horizontal reach proxy) | §4.3 positions |
+| **Max inclination** | peak inclination vs `constraints.maxInc_deg` | survey |
+| **Lithology-hardness proxy** | a hardness scalar sampled from the model along the path (e.g. from lithology class → hardness lookup, or a velocity/density proxy, doc 07) exceeding a soft threshold over a sustained interval → "hard-rock / slow-ROP warning" | §5 predicted log |
+
+```jsonc
+DrillabilityFlag {
+  "verdict": "ok" | "warn",            // never "fail" — advisory only
+  "checks": [
+    { "name": "dls",        "verdict": "warn", "value": 6.4, "limit": 5.0, "mdInterval_m": [1480, 1560] },
+    { "name": "buildRate",  "verdict": "ok",   "value": 2.8, "limit": 4.0 },
+    { "name": "mdTvdRatio", "verdict": "ok",   "value": 1.41, "limit": 2.5 },
+    { "name": "maxInc",     "verdict": "ok",   "value": 88.0, "limit": 92.0 },
+    { "name": "hardness",   "verdict": "warn", "value": 0.81, "limit": 0.7, "mdInterval_m": [2100, 2400] }
+  ]
+}
+```
+
+The thresholds are **configurable per project** (defaults shipped). A `warn` surfaces in the UI and the plan report but **does not gate export** (unlike the DLS-vs-constraint hard check in §4.4, which can block export with an override). The `dlsExceedance` term already feeds the risk score (§7.4); the other checks are advisory metadata on the plan.
+
 ---
 
 ## 5. Model intersection — the predicted log
@@ -247,18 +277,18 @@ The payoff: given a resolved trajectory, **sample every relevant volume along it
 
 ### 5.1 Sampling (reuses doc 04)
 
-Densify the trajectory into sample stations at a fixed **MD step** (default **5 m**, configurable; finer near targets). Each station has an Engineering XYZ from §4.3. Then issue **one batched `sample_along_line` / `sample_at_points` query (doc 04)** across the relevant volumes:
+Densify the trajectory into sample stations at a fixed **MD step** (default **5 m**, configurable; finer near targets). Each station has an Engineering XYZ from §4.3 — these vertices follow the **curved** minimum-curvature path, **not** a single straight wellhead→TD line. So sampling uses doc 04's **`path` (polyline) sample mode** (`SampleRequest.mode = "path"`), passing the densified survey vertices, rather than the straight-line `line` mode. Issue **one batched multi-volume `sample` query (doc 04 §9.3, `MultiSampleRequest` in `path` mode)** across the relevant volumes:
 
 ```
-points_eng   = min_curvature_positions(survey, wellhead) densified @ mdStep
-predicted    = storage.sample_at_points(
-                 points_eng,
+points_eng   = min_curvature_positions(survey, wellhead) densified @ mdStep   # curved path vertices
+predicted    = storage.sample(
+                 mode="path", path=points_eng,                # polyline = deviation survey, NOT from→to
                  volumes=[temperature, favorability, resistivity,
                           lithology, fractureDensity, hazard_LCZ, ...],
-                 with_uncertainty=True)        # doc 07 sigma/confidence bands
+                 withUncertainty=True)         # doc 07 sigma/confidence bands
 ```
 
-> **Assumption / flag to doc 04:** `sample_at_points` accepts a list of volume ids and returns aligned arrays (value + optional `sigma`/`confidence`) per volume, with out-of-ROI stations flagged `null`. If doc 04's signature differs we adapt here; the planner only needs *"give me these properties at these points, with uncertainty."*
+> **Assumption / flag to doc 04:** the `path` (polyline) sample mode accepts an ordered vertex list (the curved trajectory) plus a list of volume ids, and returns aligned arrays (value + optional `sigma`/`confidence`) per volume, with out-of-ROI stations flagged `null`. (Doc 04 §9.3's `MultiSampleRequest` already lists `points`/`line`; we rely on the `path` extension so curved laterals sample along the real wellbore, not its chord.) The planner only needs *"give me these properties at these points along this polyline, with uncertainty."*
 
 ### 5.2 Predicted-log schema
 
@@ -288,6 +318,8 @@ PredictedLog {
 
 Renders in the viewer (doc 06) as **color-mapped curves along the well tube** and as **2D log tracks** (Observable Plot, OVERVIEW §5) — temperature track, favorability track, lithology fill, hazard track, risk track, with uncertainty bands shaded.
 
+> **Units conventions (binds to doc 01 §4–§5).** Depth/MD/TVD/elevation handling is exactly doc 01 §4: `z` (Engineering elevation) is canonical and `+up`; MD/TVD/TVDSS are derived views off the survey + MD datum (`depthReference`), never stored as source of truth. **Temperature** is carried in **kelvin internally** (the canonical SI unit through sampling, propagation, and storage) and **converted to °C only for display/export** (the `*_C` schema fields above are display-facing). Field-unit display (°F, ft, °/100 ft) is a presentation choice via the doc 01 §5 units registry; the math is always SI-canonical.
+
 ---
 
 ## 6. Geothermal-specific outputs
@@ -316,15 +348,24 @@ We don't invent uncertainty — we **surface doc-07's** and convert it to action
 
 Each sampled property may carry `sigma` and/or `confidence` (doc 07 uncertainty volumes). Surfaced directly as shaded bands on the log and folded into the score. A target whose temperature confidence is low is a *known unknown*, not a silent guess.
 
-### 7.2 Fault proximity (geometric, from doc-02 features)
+### 7.2 Fault proximity — split into separate channels (NOT one risk scalar)
 
-For each station, distance to the nearest **fault feature** (doc 02). Drilling near/through faults is both opportunity (permeability) and hazard (losses, instability, seismicity). We compute a **fault-proximity factor** that *rises* close to a fault:
+For each station we compute the geometric distance to the nearest **fault feature** (doc 02) and the explicit list of fault **intersections** (path crosses a fault surface, with MD + fault id). But fault proximity is **not** a single "risk goes up near faults" term — that conflates effects that pull in **opposite directions**. We split it into **four independent channels**, each surfaced separately and combined only by the use-case-configurable composite (§7.4):
+
+| # | Channel | Sign | Source / delivery |
+|---|---|---|---|
+| **(a)** | **Productivity opportunity** — enhanced permeability in the fault-damage zone | **RAISES favorability** (a *good* thing near faults; EGS targets fractured/faulted rock) | folded into the geothermal outputs (§6) / favorability, not penalized as risk |
+| **(b)** | **Drilling hazard** — lost circulation / wellbore instability in fractured fault rock | raises hazard | §7.3 hazard channel (LCZ proxy ∩ fault proximity) |
+| **(c)** | **Induced-seismicity hazard** — slip potential on a critically-stressed fault under injection | raises hazard | **later `RiskPlugin`** (§11) — keyed off fault proximity + injection intent; core ships only the geometric proximity input it needs |
+| **(d)** | **Structural-interpretation uncertainty** — fault position/geometry is itself uncertain near the path | raises uncertainty | folded into the property-σ / structural-uncertainty term, not into "hazard" |
 
 ```
 faultProx = clamp( 1 − dist_to_fault / influence_radius , 0, 1 )   # influence_radius default 250 m
+# faultProx is an INPUT shared by channels (a)–(d); it is NOT itself "the risk".
+# Each channel maps faultProx (+ other inputs) to its own effect; the composite (§7.4) weights them.
 ```
 
-Fault **intersections** (path crosses a fault surface) are listed explicitly with MD and the fault id.
+The key point: a high-permeability fault near a hot fractured target is **favorable**, not merely risky — collapsing all four into one "risk up near faults" scalar would mislabel the best EGS targets as the worst.
 
 ### 7.3 Drilling hazards (from doc-07 hazard volumes, when present)
 
@@ -332,20 +373,24 @@ If doc 07 / the synthetic generator emits hazard likelihood volumes — **lost-c
 
 A lightweight **clearance check** vs other planned wells on the pad (§8.3): min center-to-center distance per MD; flags potential collisions. (Not formal anti-collision — see §1 non-goals.)
 
-### 7.4 Composite risk score (simple, transparent)
+### 7.4 Composite risk score (simple, transparent, use-case-configurable)
 
-Per station, a weighted blend in [0,1] — deliberately interpretable, not a black box:
+Per station, a weighted blend in [0,1] — deliberately interpretable, not a black box. Crucially it draws on the **separate fault channels** of §7.2 rather than one `faultProx` scalar, so the **same proximity can be favorable or hazardous depending on the use case** and the operator's weighting:
 
 ```
 risk =  w_T · (1 − tempConfidence)          # geological/temperature uncertainty
-      + w_F · faultProx                      # fault proximity/intersection
-      + w_H · hazardLikelihood               # LCZ / overpressure / instability (max of)
-      + w_D · dlsExceedance                  # geometry: DLS over the ceiling
-      + w_U · propUncertainty                # avg normalized σ of key properties
-   (weights default 0.30/0.25/0.25/0.10/0.10, sum 1; user-tunable per project)
+      + w_H · hazardLikelihood               # §7.3 drilling hazard incl. fault-channel (b): LCZ / overpressure / instability (max of)
+      + w_D · dlsExceedance                  # geometry: DLS over the ceiling (also feeds §4.6 drillability)
+      + w_U · structuralUncertainty          # avg normalized σ of key properties + fault-channel (d) interp. uncertainty
+   (weights default 0.40/0.30/0.10/0.20, sum 1; user-tunable per project)
 ```
 
-Aggregated per well into **mean** and **peak** risk, plus a **risk-by-depth profile**. The score is advisory and the formula/weights are visible and editable — engineers distrust opaque scores, so we keep it a glass box. The driver breakdown ("what's driving risk at this depth") is always shown alongside the number.
+Notes:
+- **Fault channel (a) — productivity opportunity — is NOT in `risk`.** It raises favorability (§6); penalizing it here would mislabel good EGS targets.
+- **Fault channel (c) — induced seismicity — is NOT in the core score.** It arrives via the later `RiskPlugin` (§11), which can add its own term keyed off fault proximity + injection intent.
+- The **composite is use-case-configurable**: a drilling-feasibility view, a productivity view, and a seismicity-aware view weight (and include/exclude) these channels differently. The default above is the drilling-feasibility view.
+
+Aggregated per well into **mean** and **peak** risk, plus a **risk-by-depth profile**. The score is advisory and the formula/weights/channels are visible and editable — engineers distrust opaque scores, so we keep it a glass box. The driver breakdown ("what's driving risk at this depth") is always shown alongside the number.
 
 ---
 
@@ -395,21 +440,44 @@ Targets, wells, and pads are **doc-02 features** in the project catalog. Each ca
 
 Goal: hand a real planning/drilling tool a **trajectory + predicted logs** in formats it already reads. Export transforms back **out** of the Engineering Frame using doc 01 §7 (`engineering_to_crs`, `from_engineering`) so coordinates land in real-world CRS when the project is georeferenced.
 
+The **supported set is decided** (`DECISIONS.md` doc 09): **CSV deviation survey + CSV predicted log + WITSML-trajectory** are *in scope*. WITSML is **not** an open "does it matter?" question — it is a P1 deliverable. LAS, Compass/named-tool survey, GeoJSON/glTF and the plan report are deferred (build when a specific downstream tool is in the loop).
+
 | Format | Content | Consumer | Priority |
 |---|---|---|---|
-| **CSV — deviation survey** | MD, Inc, Azi, TVD, N, E, DLS, + (optional) lat/lon/elev & TVDSS | universal; spreadsheet, Compass import, scripts | **P0** |
-| **CSV — predicted log** | MD, TVD, temperature(+σ), favorability, lithology, resistivity, fractureDensity, hazards, risk | analysis, plotting, hand-off | **P0** |
-| **LAS** | predicted log as 1D curves vs MD (mirrors how doc 03 ingests *real* logs) | log viewers; round-trips with ingestion | **P1** |
-| **WITSML `trajectory`** (1.4.1.1 / 2.0) | trajectoryStation objects (MD, incl, azi, tvd, N/E, dls) + CRS metadata | drilling data platforms; the industry interchange | **P1** |
-| **Survey export (Compass/`.dev`/`.wl`)** | plain MD/Inc/Azi survey | directional-drilling tools (Landmark Compass etc.) | **P1** |
-| **GeoJSON / glTF** | trajectory geometry as a feature | GIS / other viewers (doc 02 export path) | **P2** |
-| **Plan report (PDF/MD)** | targets, survey, outputs, risk, comparison table | human review / permitting packet | **P2** |
+| **CSV — deviation survey** | MD, Inc, Azi, TVD, N, E, DLS, + (optional) lat/lon/elev & TVDSS | universal; spreadsheet, scripts | **P0 — in scope** |
+| **CSV — predicted log** | MD, TVD, temperature(+σ), favorability, lithology, resistivity, fractureDensity, hazards, risk | analysis, plotting, hand-off | **P0 — in scope** |
+| **WITSML `trajectory`** (2.0 target; 1.4.1.1 legacy alt — §9.1) | trajectoryStation objects (MD, incl, azi, tvd, N/E, dls) + MD datum/CRS metadata | drilling data platforms; the industry interchange | **P1 — in scope** |
+| **LAS** | predicted log as 1D curves vs MD (mirrors how doc 03 ingests *real* logs) | log viewers; round-trips with ingestion | P2 — deferred |
+| **Survey export (Compass/`.dev`/`.wl`)** | plain MD/Inc/Azi survey | directional-drilling tools (Landmark Compass etc.) | P2 — deferred (until a named tool is in the loop) |
+| **GeoJSON / glTF** | trajectory geometry as a feature | GIS / other viewers (doc 02 export path) | P3 — deferred |
+| **Plan report (PDF/MD)** | targets, survey, outputs, risk, comparison table | human review / permitting packet | P3 — deferred |
 
 Rules:
 - **Units honored** via doc 01 §5 registry — export metric (canonical) or field units (ft, °F, °/100 ft) per the export dialog, with units written into headers.
 - **CRS round-trip:** georeferenced exports carry the project CRS + vertical datum (doc 01) so a downstream tool re-georeferences identically. Local-mode exports state "local frame, no CRS."
 - **Provenance block** in every export: `modelVersion`, design method/constraints, sampling step, generation timestamp — the plan is auditable and reproducible.
 - WITSML/LAS reuse the same writers the ingestion adapters (doc 03) need for round-trip tests — **flag to doc 03:** share the WITSML/LAS I/O module.
+
+### 9.1 WITSML conformance target
+
+WITSML is in scope (P1), so it needs a **concrete conformance target** rather than a vague "WITSML-ish" export.
+
+**Version.** Target **WITSML 2.0** (the Energistics ETP-aligned, XML-schema + data-model standard; current industry direction). **WITSML 1.4.1.1** is the supported **legacy alternative** — still widely deployed on older drilling platforms — emitted behind the same writer via a version switch when a downstream consumer requires it.
+
+**Minimum required objects / fields** (trajectory-focused; we are not a full WITSML store):
+
+| Object | Required fields |
+|---|---|
+| `Well` | `name`, `uid`, `timeZone`, surface location (CRS-referenced — `wellCRS` / `wellLocation`), water depth = n/a (onshore) |
+| `Wellbore` | `name`, `uid`, parent `Well` ref, status |
+| `Trajectory` | `name`, `uid`, parent `Wellbore` ref, **MD datum / reference** (`mdDatum` → KB/GL elevation + `datum` kind, matching doc 01 §4 `depthReference`), service company = this tool + `modelVersion` |
+| `TrajectoryStation[]` | per station: **`md`, `incl`, `azi`**, plus derived `tvd`, `dispNs`/`dispEw` (N/E), `dls`; `typeTrajStation` (planned) |
+| **Units** | every quantity carries a `uom` (EML units-of-measure; we write metric canonical — m, dega, deg/30m — per doc 01 §5, with the field-unit option) |
+| **CRS** | horizontal `wellCRS` (the project CRS, doc 01 §7) + vertical datum/MD reference, so a consumer re-georeferences identically |
+
+**Validation library.** Validate emitted XML against the **Energistics WITSML 2.0 XSD/EML schemas** (xmllint or a Python schema validator such as `xmlschema`); for 1.4.1.1 validate against the published 1.4.1.1 schema. (The Energistics-provided XSDs are the source of truth; no bespoke schema.)
+
+**Round-trip test (one, mandatory).** **Export → re-import → compare**: take a resolved `PlannedWell`, export WITSML `trajectory`, re-import it through the doc-03 WITSML reader (shared I/O module), and assert each station's **(MD, inc, azi)** and derived **(TVD, N, E)** match the original **within tolerance** (e.g. MD/TVD/N/E ≤ 0.01 m, inc/azi ≤ 0.01°, DLS ≤ 0.01°/30 m), and that MD datum + CRS survive the round trip. This guards the writer/reader pair and the unit/CRS handling in one test.
 
 ---
 
@@ -431,7 +499,7 @@ POST   /projects/{p}/pads                                         → Pad (+ cle
 GET    /projects/{p}/wells/compare?ids=...                        → comparison table
 
 # export
-GET    /wells/{w}/export?fmt=csv|las|witsml|dev|geojson&units=…   → file (CRS round-trip via doc 01)
+GET    /wells/{w}/export?fmt=csv-survey|csv-log|witsml&version=2.0|1.4.1.1&units=…  → file (CRS round-trip via doc 01; las/dev/geojson deferred)
 ```
 
 Core compute lives in Python (reuses doc 04 sampling, doc 01 transforms); `predict` is the heaviest call (batched sampling) — background-task it for very long horizontals (OVERVIEW §5).
@@ -443,7 +511,7 @@ Core compute lives in Python (reuses doc 04 sampling, doc 01 transforms); `predi
 Per OVERVIEW's R&D mandate, planning is extensible without core changes:
 
 - **`TrajectoryPlugin`** — alternative path generators (catenary, designer-of-record imports) and the **mechanics extension** (T&D, hydraulics): consumes the resolved survey + predicted log, returns extra per-station channels (side force, ECD…) that flow into the log/risk like any other.
-- **`RiskPlugin`** — swap/extend the §7.4 scoring (e.g. an induced-seismicity model keyed off fault proximity + injection intent) without touching the planner.
+- **`RiskPlugin`** — swap/extend the §7.4 scoring; in particular it delivers the **induced-seismicity hazard channel (§7.2c)** — a slip-potential model keyed off fault proximity + injection intent — without touching the planner.
 - **`ExportPlugin`** — register a new export format (a specific drilling platform's schema) via doc 03's I/O registry.
 
 Each registers like any other plugin (doc 08): declare inputs (survey, log, features), outputs (channels/score/file), no core edits.
@@ -457,21 +525,19 @@ Each registers like any other plugin (doc 08): declare inputs (survey, log, feat
 3. **DLS stored in °/30 m** (metric canonical), displayed in °/100 ft on request via the units registry (doc 01 §5). DLS ceiling is a hard constraint that flags in-viewer and gates export (overridable with a logged note).
 4. **Fidelity = geometric planning only.** Torque-and-drag / hydraulics / BHA mechanics are explicitly out, behind a `TrajectoryPlugin` extension path (§4.5, §11).
 5. **Targets and wells are doc-02 features**, persisted in the catalog, rendered through the normal feature path, versioned against `modelVersion` with stale-detection.
-6. **Predicted log = batched `sample_along_line` (doc 04) across doc-07 volumes**, with uncertainty bands carried through to outputs. This doc never re-implements sampling or re-derives favorability/temperature.
-7. **Risk is a transparent, user-tunable weighted score** (temperature confidence + fault proximity + hazard likelihood + DLS exceedance + property σ), always shown with its driver breakdown — a glass box, not a black box.
+6. **Predicted log = batched `sample` in `path`/polyline mode (doc 04 §9.3) across doc-07 volumes** — vertices follow the curved minimum-curvature trajectory, not a straight chord — with uncertainty bands carried through to outputs. This doc never re-implements sampling or re-derives favorability/temperature.
+7. **Risk is a transparent, user-tunable, use-case-configurable weighted score** (temperature confidence + drilling-hazard likelihood + DLS exceedance + structural/property σ), always shown with its driver breakdown — a glass box, not a black box. **Fault proximity is split into four separate channels** (§7.2): productivity opportunity raises favorability (not risk), drilling and seismicity hazards are distinct, structural uncertainty is its own term, and the **induced-seismicity channel is delivered by the later `RiskPlugin`** — never collapsed into one "risk up near faults" scalar.
 8. **Geothermal outputs** = predicted BHT, target/reservoir pay length, productive-fracture intersection count, in-window fraction — each with propagated uncertainty.
-9. **Export priorities: CSV deviation survey + CSV predicted log are P0**; LAS, WITSML-trajectory, and Compass survey are P1; all round-trip through doc-01 CRS and the doc-03 I/O writers (flagged for sharing).
+9. **Export supported set is decided: CSV deviation survey + CSV predicted log (P0) + WITSML-trajectory (P1) — all in scope.** WITSML targets **2.0** (1.4.1.1 legacy alt) with a defined conformance target + export→re-import round-trip test (§9.1). LAS, Compass/named-tool survey, and GeoJSON/glTF are deferred until a specific downstream tool is in the loop. All exports round-trip through doc-01 CRS and the doc-03 I/O writers (flagged for sharing).
 10. **Multi-well pads are first-class** (slots, clearance, EGS lateral-spacing intent), matching the Fervo/FORGE multi-well workflow.
 
 ---
 
 ## 13. Open questions for you
 
-> *(The 2–3 highest-leverage of these are escalated to the parent for an immediate decision; the rest are here for the record.)*
+> *(Resolved forks have moved to `DECISIONS.md` / §12 and are no longer listed here. Three earlier questions — trajectory fidelity, export formats, and seismicity-as-`RiskPlugin` — are **DECIDED**: geometric + crude drillability flag in core (§4.6); CSV survey + CSV log + WITSML-trajectory in scope (§9, §9.1); induced seismicity is the later `RiskPlugin` fault-channel (§7.2c, §11). What remains below is genuinely open.)*
 
-1. **Trajectory-planning fidelity ceiling.** Confirmed plan is *geometric only* (min-curvature + DLS), mechanics behind a plugin. Is there any near-term mechanical check you'd want *in core* before the plugin (e.g. a crude DLS-vs-build-rate feasibility, or a simple T&D "drag risk" flag), or is pure geometry right for the R&D phase?
-2. **Export formats that actually matter to you.** P0 = CSV survey + CSV log; P1 = LAS, WITSML-trajectory, Compass `.dev`. Which (if any) of WITSML / Compass / LAS is must-have for *your* downstream workflow, and is there a specific tool (Landmark Compass, Petrel, a Fervo internal format, openwell) whose import schema we should target precisely?
-3. **Risk model scope.** §7.4 is a transparent weighted blend. Do you want **induced-seismicity potential** treated as a first-class risk channel now (relevant for EGS / your KB), keyed off fault proximity + injection intent — or is that a later `RiskPlugin`?
-4. **Target picking primary workflow.** Assumed primary = click-on-favorability-isosurface (doc 07). Confirm that's the main path vs threshold-grow-a-zone or manual MD/TVD entry, so doc 06 prioritizes the right gizmo.
-5. **EGS productivity proxy.** "Productive fracture intersections" + "reservoir-volume sampled" are rough EGS deliverability proxies. Is a simple intersection-count enough for planning, or do you want a slightly richer proxy (aperture/favorability-weighted, or a stimulated-rock-volume estimate) given EGS is the headline use case?
+1. **Target picking primary workflow.** Assumed primary = click-on-favorability-isosurface (doc 07). Confirm that's the main path vs threshold-grow-a-zone or manual MD/TVD entry, so doc 06 prioritizes the right gizmo.
+2. **EGS productivity proxy.** "Productive fracture intersections" + "reservoir-volume sampled" are rough EGS deliverability proxies. Is a simple intersection-count enough for planning, or do you want a slightly richer proxy (aperture/favorability-weighted, or a stimulated-rock-volume estimate) given EGS is the headline use case?
+3. **Drillability-flag thresholds.** §4.6 ships defaults for the build/turn-rate, MD/TVD-ratio and lithology-hardness limits. Are there field-calibrated values you'd want as the shipped defaults, or is "configurable per project with reasonable defaults" fine for the R&D phase?
 ```

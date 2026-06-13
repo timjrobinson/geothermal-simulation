@@ -12,7 +12,7 @@
 > inverse problem.
 >
 > **Binds to:** spatial/units conventions from doc 01 (LOCKED). **References (does not
-> redefine):** `PropertyModel` / `FusedGrid` / uncertainty schemas from doc 02;
+> redefine):** `PropertyModel` / `FusedEarthModel` (doc 02 §11) / uncertainty schemas from doc 02;
 > storage & serving of derived volumes from doc 04; the transform-plugin registration
 > mechanism from doc 08. Where those schemas are needed, names from OVERVIEW §2/§6 are
 > used as the contract and assumptions are flagged explicitly.
@@ -26,9 +26,16 @@
 >   property/state fields these transforms consume.
 > - **Favorability combination = ship weighted-linear AND fuzzy-logic; defer Bayesian**
 >   until known-occurrence training data exists. (Drafted default was weighted-linear
->   only by default.)
+>   only by default.) **The shipped *default* is now fuzzy-conjunction** (heat ∧ fluid ∧
+>   permeability), with weighted-linear demoted to an explicit *exploratory* mode — this
+>   default change was raised by the code-review critique (#11) and is **flagged for user
+>   confirmation**.
 > - **Uncertainty = delta-method everywhere, Monte-Carlo opt-in** per nonlinear
 >   transform — confirmed.
+> - **Rock-physics transforms are calibration-aware** (critique #10/#14): every transform
+>   declares `assumptions` + a `calibrationStatus`, and **uncalibrated outputs are labelled
+>   as likelihood/proxy fields, not deterministic measurements**, until anchored by well /
+>   core / geochem calibration (§4.8).
 
 ---
 
@@ -40,13 +47,13 @@ Everything operates in the **Engineering Frame** (doc 01 §1): ENU, metres, Z-up
 
 ```
 PropertyModels (native grids/meshes, Engineering coords, doc 02)
-        │  ① RESAMPLE onto canonical FusedGrid (non-destructive)
+        │  ① RESAMPLE onto canonical FusedEarthModel grid (doc 02 §11, non-destructive)
         ▼
   Fused property stack  ──②──►  CROSS-PLOT / STATS / CLUSTER  ──►  analysis panels
         │                                                          (D3/Observable Plot)
         │  ③ ROCK-PHYSICS TRANSFORMS (registry: declarative + Python fn)
         ▼
-  Derived volumes (temperature-likelihood, porosity, alteration, favorability …)
+  Derived volumes (temperature-LIKELIHOOD until well-calibrated, porosity, alteration, favorability …)
         │  stored & served as PropertyModels (doc 04) → renderable layers (doc 06)
         ▼
   ④ UNCERTAINTY propagated end-to-end → confidence volumes + low-sensitivity flags
@@ -56,25 +63,30 @@ The four numbered stages map to OVERVIEW §6 fusion levels **1→2→3 + uncerta
 
 ---
 
-## 1. The Fused Earth Model grid (consumer of doc 02)
+## 1. The Fused Earth Model grid (consumer of doc 02 §11)
 
-The canonical fused grid is **defined in doc 02** (`FusedGrid`); this doc is its primary *consumer*. We restate only the contract we depend on:
+The canonical fused grid is **defined in doc 02 §11 (`FusedEarthModel` / `FusedLayer`)**; this doc is
+its primary *consumer*. We restate only the contract we depend on (authoritative shape and field
+names live in doc 02 — the sketch below is illustrative, see A2):
 
 ```jsonc
-// Assumed shape from OVERVIEW §2 / doc 02 — names are the contract, not a redefinition.
-FusedGrid {
-  "id": "fused-default",
-  "kind": "regular",                 // MVP: regular voxel grid. (octree/unstructured = later)
-  "origin":  [x0, y0, z0],           // Engineering metres (within SpatialFrame.roi/depthRange)
-  "spacing": [dx, dy, dz],           // metres; default isotropic (see §1.1)
-  "shape":   [nx, ny, nz],
-  "crs": "engineering"               // always; doc 01 guarantees this
+// Illustrative only — doc 02 §11 FusedEarthModel.support (a VolumeSupport) is authoritative.
+FusedEarthModel {                    // id prefix "fem_"; a project may hold several
+  "gridType": "regular_voxel",       // doc 02 §11 default. (octree/unstructured = later)
+  "support":  VolumeSupport,         // origin/spacing/shape in Engineering metres, axis order [z,y,x]
+  "layers":   FusedLayer[],          // each refs sourcePropertyModelId@sourceVersion (originals read-only)
+  "values":   "<zarr group>"         // one array per layer (+ sigma) sharing the grid
+  // crs is always engineering (doc 01 guarantees this)
 }
 ```
 
+**Canonical temperature is kelvin** (doc 01 §5); transforms compute and store temperature in
+kelvin internally and may *display* °C — favorability transfer functions and `valid_range`s here
+quote the canonical kelvin value alongside any °C convenience label.
+
 **Reconciled with doc 02 (§11 `FusedEarthModel`) — now confirmed, not assumed:**
 - **A1 ✓ confirmed.** The fused grid **is a regular voxel grid** (doc 02 §11 default `gridType:"regular_voxel"`). Octree/unstructured fusion is a later extension delivered via the LOD pyramid, not an irregular topology; the resampling API (§2.4) doesn't assume regularity but only the regular path ships first.
-- **A2 ✓ confirmed (naming aligned).** The canonical object is doc 02's **`FusedEarthModel`** (id prefix `fem_`), bounded by `SpatialFrame.roi` × `depthRange`. A project **may hold several** (coarse overview + zoomed target-zone), each its own `fusedModel` Dataset — *not* forced-singular. The `FusedGrid` sketch above is illustrative; the authoritative shape is `FusedEarthModel.support` (a doc 02 `VolumeSupport`), so use doc 02's field names and **axis order `shape:[nz,ny,nx]`, origin/spacing `[…z,y,x]`** (z-leading, Z-up) — not the `[nx,ny,nz]` ordering sketched here.
+- **A2 ✓ confirmed (naming aligned).** The canonical object is doc 02's **`FusedEarthModel`** (id prefix `fem_`), bounded by `SpatialFrame.roi` × `depthRange`. A project **may hold several** (coarse overview + zoomed target-zone), each its own `fusedModel` Dataset — *not* forced-singular. The `FusedEarthModel` sketch above is illustrative; the authoritative shape is `FusedEarthModel.support` (a doc 02 `VolumeSupport`), so use doc 02's field names and **axis order `shape:[nz,ny,nx]`, origin/spacing `[…z,y,x]`** (z-leading, Z-up) — not the `[nx,ny,nz]` ordering sketched here.
 - **A3 ✓ confirmed.** A derived/fused volume **is a `PropertyModel`** (doc 02 §4) on the fused-grid `VolumeSupport`, carrying provenance to its inputs + transform (§4.3). Each native property enters as a `FusedLayer` referencing `sourcePropertyModelId@sourceVersion` (doc 02 §11) — originals stay read-only.
 
 ### 1.1 Choosing fused-grid resolution
@@ -94,7 +106,7 @@ We deliberately **do not** resample everything to the finest native grid — tha
 
 ## 2. Resampling native models onto the fused grid
 
-**Goal (OVERVIEW §6.1/§2):** put every property on a *shared support* so cells are co-located and comparable — **without destroying native originals**. Native models stay in storage untouched; resampling produces a **new** array bound to a `FusedGrid`.
+**Goal (OVERVIEW §6.1/§2):** put every property on a *shared support* so cells are co-located and comparable — **without destroying native originals**. Native models stay in storage untouched; resampling produces a **new** array bound to a `FusedEarthModel` (doc 02 §11) as a `FusedLayer`.
 
 ### 2.1 Non-destructive principle
 
@@ -102,7 +114,7 @@ We deliberately **do not** resample everything to the finest native grid — tha
 |---|---|
 | Native `PropertyModel` | immutable input; never modified or overwritten |
 | Resampled output | a **new** derived `PropertyModel` (`derivation: "resample"`), or a cached fused-stack layer |
-| Re-derivable | resampling is a pure function of (native model + FusedGrid + method); cacheable, re-runnable, versioned (§4.4) |
+| Re-derivable | resampling is a pure function of (native model + FusedEarthModel grid + method); cacheable, re-runnable, versioned (§4.4) |
 | Storage | written as a Zarr array via doc 04, same as any property |
 
 Resampled layers are **cached** keyed by `(propertyModelId, propertyModelVersion, fusedGridId, method, params)`. Cache invalidates if the native model version changes.
@@ -217,7 +229,19 @@ A **transform** maps one or more input property volumes → an **output derived 
 
 ### 4.1 What a transform is
 
-A transform = **declarative spec** (metadata, I/O contract, parameters, units) **+ a pure Python function** (the math). The spec makes it discoverable, parameterizable, versionable, and UI-drivable; the function does the physics. This split mirrors the plugin pattern of doc 08 (which owns the *registration* mechanism — see §4.7).
+A transform = **declarative spec** (metadata, I/O contract, parameters, units, **stated assumptions + calibration status**) **+ a pure Python function** (the math). The spec makes it discoverable, parameterizable, versionable, and UI-drivable; the function does the physics. This split mirrors the plugin pattern of doc 08 (which owns the *registration* mechanism — see §4.7).
+
+**Every transform declares two honesty fields (critique #10/#14):**
+- **`assumptions`** — a human-readable list of the conditions the relationship presumes
+  (e.g. "single brine phase, no steam", "porosity spatially constant", "Archie `a=1`,
+  clay-free"). Surfaced in the UI next to the output layer.
+- **`calibrationStatus` ∈ `uncalibrated | well_calibrated | lab_calibrated`** — whether the
+  parameters in use have been anchored to *this site's* well logs / core / geochem (§4.8).
+  **An `uncalibrated` transform's output is a LIKELIHOOD / PROXY field, not a deterministic
+  measurement.** The harness (§4.5) enforces this: an uncalibrated temperature transform
+  outputs a field titled **"temperature likelihood"** and stamps its `UncertaintySpec.tier`
+  as `proxy` (doc 02 §6) — it does **not** present as a measured "temperature" volume until a
+  calibration run (§4.8) promotes it.
 
 ```python
 @register_transform   # registry hook — mechanism defined in doc 08
@@ -227,26 +251,36 @@ class ResistivityToTemperature(Transform):
     title   = "Resistivity → Temperature (Arps fluid-conductivity)"
     target  = "temperature"            # geothermal target taxonomy (§4.2)
 
+    assumptions = [                    # stated, UI-surfaced (critique #10/#14)
+        "single liquid brine phase (no boiling/steam)",
+        "porosity & salinity treated as constant params unless calibrated per-cell",
+        "Archie a=1; bulk conduction only (use waxman_smits in clay/altered rock)",
+    ]
+    calibration_status = "uncalibrated"   # default until a well/core run promotes it (§4.8)
+
     inputs  = [InputSpec("resistivity", unit="ohm.m", required=True)]
-    output  = OutputSpec("temperature", unit="degC",
-                         valid_range=(0, 400), colormap="thermal")
+    # canonical temperature is KELVIN (doc 01 §5); °C is a display convenience only.
+    # While uncalibrated the harness retitles this output "temperature likelihood".
+    output  = OutputSpec("temperature", unit="kelvin",
+                         valid_range=(273, 673), colormap="thermal",   # ≈0–400 °C
+                         proxy_when_uncalibrated=True)
 
     params  = [
         Param("porosity",      float, default=0.10, range=(0.01, 0.5)),
         Param("m_cementation", float, default=2.0,  range=(1.3, 2.5)),
         Param("fluid_salinity_ppm", float, default=5000, range=(100, 250000)),
-        Param("T_ref_degC",    float, default=25.0),
+        Param("T_ref_K",       float, default=298.15),
     ]
 
     def apply(self, ctx, resistivity, *, porosity, m_cementation,
-              fluid_salinity_ppm, T_ref_degC):
+              fluid_salinity_ppm, T_ref_K):
         # 1) Archie: bulk ρ + porosity → pore-fluid conductivity σ_w
         sigma_bulk = 1.0 / resistivity
         sigma_w = sigma_bulk / (porosity ** m_cementation)      # a=1
-        # 2) fluid conductivity ↑ ~2%/°C (Arps) at fixed salinity → invert for T
-        sigma_w_ref = brine_conductivity(fluid_salinity_ppm, T_ref_degC)
-        temperature = T_ref_degC + (sigma_w / sigma_w_ref - 1.0) / 0.02
-        return ctx.as_output(temperature)     # carries units, masks nodata, σ (§5)
+        # 2) fluid conductivity ↑ ~2%/°C (Arps) at fixed salinity → invert for T (kelvin)
+        sigma_w_ref = brine_conductivity(fluid_salinity_ppm, T_ref_K)
+        temperature_K = T_ref_K + (sigma_w / sigma_w_ref - 1.0) / 0.02
+        return ctx.as_output(temperature_K)   # carries units(kelvin), masks nodata, σ + tier (§5)
 ```
 
 ### 4.2 Target taxonomy & the starter transform library
@@ -255,7 +289,7 @@ Transforms declare a **geothermal `target`** so the UI can group them and favora
 
 | Target | Transform(s) | Inputs → output | Relationship |
 |---|---|---|---|
-| **Temperature** | `resistivity_to_temperature` | ρ (+φ, salinity) → T-likelihood / °C | Archie + Arps fluid-conductivity vs T |
+| **Temperature** | `resistivity_to_temperature` | ρ (+φ, salinity) → **temperature *likelihood*** (kelvin; promoted to calibrated T only after §4.8) | Archie + Arps fluid-conductivity vs T |
 | **Fluid / saturation** | `archie_saturation` | ρ, φ → water saturation Sw | Archie's law (`Sw = ((a·ρ_w)/(φ^m·ρ_t))^{1/n}`) |
 | **Fluid / clay-conduction** | `dual_water` / `waxman_smits` (opt) | ρ, φ, clay → Sw with surface conduction | corrects Archie in clay/altered rock |
 | **Porosity** | `velocity_to_porosity` | Vp → φ | Wyllie time-average / Raymer-Hunt-Gardner |
@@ -266,7 +300,7 @@ Transforms declare a **geothermal `target`** so the UI can group them and favora
 | **Fracture density (struct.)** | `vp_vs_fracture_proxy` (opt) | Vp/Vs, attenuation → fracture index | Vp/Vs anomalies / low-velocity zones |
 | **Permeability** | `fracture_to_permeability` (proxy) | fracture density (+ alteration) → relative perm index | heuristic; flagged low-confidence |
 
-> **Physics honesty note.** These relations are **site-calibratable approximations**, not universal truths. Every transform's params (porosity, cementation exponent, salinity, matrix density, fluid velocity) are **first-class and user-tunable**, and where well logs exist they are the **calibration anchor** (§3.1). The platform's R&D value is making it trivial to swap relationships and re-parameterize, then *see* the effect in 3D against ground truth.
+> **Physics honesty note.** These relations are **site-calibratable approximations**, not universal truths. Every transform's params (porosity, cementation exponent, salinity, matrix density, fluid velocity) are **first-class and user-tunable**, and where well logs / core / geochem exist they are the **calibration anchor** (§4.8) — not a secondary cross-plot but the *centre* of the workflow. **Until calibrated, every output is a likelihood/proxy field** (`calibrationStatus:"uncalibrated"`, `UncertaintySpec.tier:"proxy"`), never a measured value. The platform's R&D value is making it trivial to swap relationships and re-parameterize, then *see* the effect in 3D — against synthetic ground truth where it exists (doc 05 emits truth fields), and against wells where a real project never has truth, only sparse calibration probes.
 
 ### 4.3 Output = a `PropertyModel`, stored & served identically (doc 04)
 
@@ -280,9 +314,12 @@ A transform output is **indistinguishable downstream from an ingested property m
   "transformVersion": "1.2.0",
   "fusedGridId": "fused-default",
   "inputs": [ {"propertyModelId": "...", "version": "..."} ],
-  "params": { "porosity": 0.10, "m_cementation": 2.0, "fluid_salinity_ppm": 5000, "T_ref_degC": 25.0 },
+  "params": { "porosity": 0.10, "m_cementation": 2.0, "fluid_salinity_ppm": 5000, "T_ref_K": 298.15 },
+  "calibrationStatus": "uncalibrated",         // uncalibrated ⇒ output is a likelihood/proxy field
+  "calibratedBy": null,                        // §4.8: well/core/geochem run id once promoted
+  "assumptions": [ "single brine phase", "Archie a=1, clay-free", "..." ],
   "createdAt": "...", "createdBy": "tim@…",
-  "sigmaRef": "<zarr path to confidence volume>"   // §5
+  "sigmaRef": "<zarr path to confidence volume>"   // §5 (tier=proxy while uncalibrated)
 }
 ```
 
@@ -306,7 +343,12 @@ Every transform runs through a common harness so individual `apply()` functions 
 4. **Vectorized apply** over valid cells (`numpy`/`xarray`, chunk-wise so it streams; large jobs are Dask-able later).
 5. **Clamp/validate** to the output's `valid_range`; out-of-range flagged (often a sign of bad params) and recorded.
 6. **Propagate σ** (§5.2) into the paired confidence volume.
-7. **Write** output + σ + mask as a derived `PropertyModel` (doc 04).
+7. **Stamp calibration honesty:** if `calibrationStatus == "uncalibrated"`, retitle the output as a
+   **"… likelihood"** field and set its `UncertaintySpec.tier = "proxy"` (doc 02 §6) so every
+   downstream viewer/favorability consumer treats it as proxy, not measurement. A calibration run
+   (§4.8) is what promotes the status and tier.
+8. **Write** output + σ + mask as a derived `PropertyModel` (doc 04), carrying `assumptions` and
+   `calibrationStatus` into the provenance block (§4.3).
 
 ### 4.6 The "geothermal favorability" derived volume (OVERVIEW §6.3)
 
@@ -319,21 +361,36 @@ Favorability is a **special transform** that combines *multiple evidence layers*
 - **alteration** present (fossil/active hydrothermal signature),
 - (optionally) structural proximity to a mapped fault (from features, doc 02).
 
-The classic geothermal play needs **heat + fluid + permeability** co-located; favorability encodes that conjunction.
+The classic geothermal play needs **heat + fluid + permeability** co-located; favorability encodes that conjunction — and that conjunction is exactly what a *compensatory* score erases.
+
+**Default = fuzzy-conjunction (critique #11).** A geothermal play requires heat **AND** fluid **AND**
+permeability to **co-exist** in the same cell; a weighted-linear sum is *compensatory* — a soaring
+temperature can numerically mask **absent permeability** and paint a dry-hot cell as "favorable."
+The shipped default is therefore **fuzzy-AND over the *required* evidence** (no drilling target
+without a fluid path). **Weighted-linear is retained as an explicit *exploratory* mode**, not the
+default. Both still ship (per the decision); only the default changed.
+
+> **Flagged for user confirmation:** making fuzzy-conjunction (not weighted-linear) the default
+> was raised by the code-review critique (#11), beyond the original decision text — please confirm.
 
 **Three pluggable combination methods** (user-selectable — this is the R&D knob):
 
 | Method | Formula (per cell) | Character | When |
 |---|---|---|---|
-| **Weighted linear** *(default)* | `F = Σ wᵢ·eᵢ / Σ wᵢ`, each `eᵢ∈[0,1]` normalized | simple, transparent, fast; compensatory (a strong layer offsets a weak one) | first pass, explainable |
-| **Fuzzy-logic** | fuzzy-AND (`min` / product) for *required* conjunctions, fuzzy-OR (`max`) for alternatives, via a small expression tree | encodes "heat **AND** fluid **AND** perm" non-compensatorily | when conjunction matters (recommended for the real geothermal model) |
-| **Bayesian (weights-of-evidence)** | combine evidence as posterior odds; `logit(P) = logit(prior) + Σ Wᵢ⁺/⁻` | probabilistic, calibratable to known occurrences, well-founded uncertainty | when training points / known plays exist |
+| **Fuzzy-logic** *(default)* | fuzzy-AND (`min` / product) for *required* conjunctions, fuzzy-OR (`max`) for alternatives, via a small expression tree | encodes "heat **AND** fluid **AND** perm" non-compensatorily; an absent required layer pulls the cell toward 0 | **default** — physically faithful to the geothermal play conjunction |
+| **Weighted linear** *(exploratory)* | `F = Σ wᵢ·eᵢ / Σ wᵢ`, each `eᵢ∈[0,1]` normalized | simple, transparent, fast; **compensatory** (a strong layer offsets a missing one) | explicit exploratory pass; **missing *required* evidence must be made visually obvious** (see below), not silently averaged away |
+| **Bayesian (weights-of-evidence)** | combine evidence as posterior odds; `logit(P) = logit(prior) + Σ Wᵢ⁺/⁻` | probabilistic, calibratable to known occurrences, well-founded uncertainty | **deferred** (per decision) until training points / known plays exist |
+
+**Exploratory-mode guard.** When weighted-linear is selected, any cell missing a `role:"required"`
+evidence layer is **not** quietly down-weighted — it is rendered with an explicit overlay (hatch /
+desaturation) and excluded from the "top targets" ranking, so the compensatory blind spot can never
+silently promote a dry-hot cell.
 
 Spec sketch:
 
 ```jsonc
 FavorabilitySpec {
-  "method": "weighted" | "fuzzy" | "bayesian",
+  "method": "fuzzy" | "weighted" | "bayesian",   // DEFAULT "fuzzy" (conjunction); "weighted" = exploratory
   "evidence": [
     { "source": "<derivedModelId|nativeModelId>",
       "target":  "temperature",
@@ -351,7 +408,9 @@ FavorabilitySpec {
 - **Each evidence layer is normalized to `[0,1]`** via a per-layer **transfer/fuzzy-membership function** (ramp, sigmoid, gaussian-band) — e.g. "favorable temperature ramps 150→250 °C." These curves are **user-editable in the UI** (same control as the viewer's transfer functions, doc 06).
 - **Weights / membership shapes / method are all user-configurable** — favorability is explicitly a *research instrument*, not a fixed score. The UI exposes sliders; re-running writes a new versioned favorability volume.
 - **`missingPolicy`** decides whether a cell lacking one evidence layer is nodata (strict), neutral, or just dropped from the weighting — this interacts hard with footprints (§2.3) and is surfaced to the user, because favorability is only trustworthy where its evidence actually overlaps.
-- Output is a `PropertyModel` (`derivation.kind = "favorability"`, colormap diverging/heat), with a paired **confidence volume** (§5) and an **evidence-overlap mask** (how many evidence layers were present per cell — itself a renderable diagnostic).
+- Output is a `PropertyModel` (`derivation.kind = "favorability"`, colormap diverging/heat), with a paired **confidence volume** (§5) and **two honesty indicators** that ship as their own renderable diagnostic volumes (critique #4):
+  - **Evidence overlap** — per cell, **how many of the *required* evidence layers actually cover it** (count and/or fraction of required layers present, respecting each layer's footprint/DOI §2.3). A high favorability score over an overlap of 1-of-3 is a warning, not a target.
+  - **Assumption burden** — per cell, **how much of the score rides on *uncalibrated* transforms** (e.g. the fraction of contributing evidence whose source has `calibrationStatus:"uncalibrated"` / `tier:"proxy"`). Surfaces where a hotspot is essentially "the rock-physics guessed," so calibration (§4.8) can be prioritized there.
 
 ### 4.7 Registry mechanism (overlaps doc 08)
 
@@ -360,6 +419,43 @@ The **how-do-plugins-register** mechanism is owned by **doc 08** (plugin archite
 > A transform plugin exposes: `id`, `version`, `title`, `target`, `inputs[]` (name/unit/required), `output` (unit/range/colormap), `params[]` (name/type/default/range), and an `apply(ctx, **inputs, **params)` pure function. Registration, discovery, and lifecycle = doc 08. The fusion engine consumes the registry to (a) populate the UI's transform palette, (b) validate I/O, (c) run the harness (§4.5).
 
 **Assumption flagged for doc 08:** the registry supports both **built-in** transforms (shipped, the §4.2 library) and **user/plugin** transforms (the R&D path), keyed by `id`, with versioned resolution.
+
+### 4.8 Calibration workflow (well logs / core / geochem at the centre)
+
+Calibration is **not a secondary cross-plot** — it is the *centre* of the rock-physics workflow and
+the gate that turns a proxy field into a measurement (critique #10/#14). A transform is born
+`uncalibrated`; ground-truth probes are what promote it.
+
+**The loop:**
+
+```
+① INGEST ground truth      well logs (temperature, resistivity, porosity…), core, geochem
+                           — sampled ALONG the well path (§3.1), not voxelized
+        ▼
+② ESTIMATE site params     fit the transform's params (porosity, m_cementation, salinity, …)
+                           to the (measured ↔ predicted) pairs at the probe locations;
+                           produce a site-specific PARAMETER DISTRIBUTION (mean + σ), not a point
+        ▼
+③ RE-RUN transforms        push the calibrated parameter distribution through apply() over the
+                           full fused grid (param σ now feeds §5.2 propagation — often dominant)
+        ▼
+④ PROMOTE / LABEL          calibrationStatus → well_calibrated (or lab_calibrated for core/lab);
+                           UncertaintySpec.tier proxy → quantitative WHERE wells constrain it;
+                           cells far from any probe STAY proxy (calibration is local) and the
+                           output keeps its "likelihood" labelling there
+```
+
+- **Promotion is spatially honest.** A single well calibrates its neighbourhood, not the whole
+  basin. Cells beyond the wells' resolving distance remain `tier:"proxy"` / "likelihood" — the
+  assumption-burden indicator (§4.6) shows exactly where that is.
+- **Parameter distributions, not point fits.** Calibration emits a `Param` σ that flows into
+  uncertainty propagation (§5.2); a confident-looking calibrated volume still carries the residual
+  spread of the fit.
+- **Synthetic vs real.** The synthetic earth (doc 05) has full **truth fields**, so calibration
+  quality can be *scored* against the oracle there. **Real projects have no truth field** — only the
+  sparse well/core/geochem probes — so the calibrated transform is the best estimate, never a
+  checked-against-truth value. The platform must never let a synthetic-only honesty (truth scoring)
+  masquerade as available on real data.
 
 ---
 
@@ -382,6 +478,20 @@ Each native `PropertyModel` **carries an uncertainty representation** — doc 02
 
 **A4 ✓ confirmed against doc 02 §6.** A `PropertyModel` exposes `uncertainty` as a co-registered **per-cell 1σ array** (`<property>_sigma`, canonical unit) and optionally a `ResolutionSpec` (DOI surface + smoothing kernel) — the "noisy vs blurry" complement. `uncertainty:null` means **unknown, not zero**, so we attach a **default conservative relative σ per property** (from the property registry) to keep propagation running. Fused layers also carry a `validMask` (doc 02 §11 `FusedLayer.validMask`) for coverage. (The `confidence`/`variance` forms in the table are alternate `UncertaintySpec.representation` values doc 02 §6 permits.)
 
+**Tier and independence ride through (doc 02 §6, critique #12).** Each `UncertaintySpec` carries a
+**`tier` ∈ `quantitative | proxy | qualitative | unknown`** and an **`independence` flag
+(`assumed_independent | correlated_unmodeled`)**. Fusion **must consume both**:
+- **Tier governs how confidence is *displayed*.** When any input to a derived volume is `proxy` or
+  `qualitative` tier (e.g. an uncalibrated transform output §4.8), the resulting confidence is shown
+  **qualitatively as low / med / high — never as a spurious decimal σ**. A precise-looking number on
+  top of a rule-of-thumb input is exactly the false precision §4.8 guards against. `unknown` tier is
+  rendered un-weightable, not as high confidence.
+- **Independence governs propagation validity.** Delta-method propagation (§5.2) **assumes input
+  independence**; an input flagged `correlated_unmodeled` makes the propagated σ an
+  under-estimate — the harness surfaces that caveat rather than reporting a falsely tight σ.
+- **Tier is the *minimum* over a transform's inputs**, then capped by the transform's own
+  `calibrationStatus` (§4.8): an uncalibrated transform can never output better than `proxy`.
+
 ### 5.2 Propagation rules
 
 Uncertainty rides through the same pipeline as the values:
@@ -397,6 +507,18 @@ Uncertainty rides through the same pipeline as the values:
 For output  y = f(x₁, … xₙ; θ):
     σ_y² ≈ Σᵢ (∂f/∂xᵢ)² · σ_xᵢ²     (+ optional param covariance Σ_θ term)
 ```
+
+> **This formula assumes input independence.** It drops the cross-terms `2·(∂f/∂xᵢ)(∂f/∂xⱼ)·cov(xᵢ,xⱼ)`,
+> so when an input's `independence` flag is `correlated_unmodeled` (doc 02 §6) the result is an
+> **under-estimate of σ** — the harness flags it and, with proxy/qualitative-tier inputs, falls back
+> to qualitative low/med/high confidence (§5.1) rather than a falsely tight number.
+
+> **Low σ ≠ well-resolved (resolution-limited volumes).** Smooth methods (gravity, MT) can have a
+> **low per-cell σ yet poor resolving power** — they are *confidently blurry*. Per-cell σ alone will
+> over-state how much is actually known. Fusion therefore surfaces resolving power via the
+> **`ResolutionSpec` / DOI** (doc 02 §6 — kernel length vs fused spacing, depth of investigation),
+> **not σ alone**: a cell with tight σ but a resolution kernel ≫ the fused spacing is flagged
+> low-sensitivity (§5.4), and the assumption-burden / overlap diagnostics (§4.6) keep it honest.
 
 - `∂f/∂xᵢ` evaluated **numerically** (finite difference) by the harness so transform authors don't hand-derive Jacobians — they just supply `apply()`.
 - **Optional Monte-Carlo mode** for strongly nonlinear transforms (Archie is nonlinear in φ): sample inputs ~ their distributions, push K samples through `apply()`, take output mean/σ/quantiles. Job-based (§5.5). This is the more correct path; delta method is the fast default.
@@ -469,37 +591,30 @@ Ties to OVERVIEW §8 (synthetic earth has a "hot, conductive, altered zone") and
 2. **Resample** all three onto `fused-default` (§2): resistivity & density block/trilinear, each masked to footprint/DOI → co-located stack + coverage + σ.
 3. **Cross-plot** log(ρ) vs density, color by depth → spot the low-ρ/low-density anomaly cluster (§3.2).
 4. **GMM cluster** the stack → a class volume; the anomalous class ≈ the altered zone; label it (§3.3).
-5. **Transform** resistivity→temperature (Archie+Arps) and velocity→porosity (§4.2); **microseismic→fracture density** for permeability proxy.
-6. **Favorability** (fuzzy-AND of high-T **AND** high-perm **AND** fluid) → a single index volume (§4.6).
-7. **Confidence** volume modulates opacity; below-DOI deep region renders faint (§5.3–5.4).
-8. **Validate:** the favorability hot-spot should coincide with the synthetic ground-truth geothermal anomaly — the end-to-end fusion correctness check.
+5. **Transform** resistivity→**temperature *likelihood*** (Archie+Arps, kelvin — `uncalibrated`, `tier:proxy` until §4.8) and velocity→porosity (§4.2); **microseismic→fracture density** for permeability proxy.
+5b. **Calibrate** against the synthetic well logs (§4.8): fit site params → re-run → promote the temperature likelihood to calibrated T *near the wells* (it stays proxy/likelihood away from them). On a real project this step has only sparse probes and no truth field to score against.
+6. **Favorability** (default fuzzy-AND of high-T **AND** high-perm **AND** fluid) → a single index volume, plus its **evidence-overlap** and **assumption-burden** diagnostics (§4.6).
+7. **Confidence** volume modulates opacity; below-DOI deep region renders faint, and resolution-limited (smooth gravity/MT) cells flag low-sensitivity via `ResolutionSpec`/DOI even where σ is small (§5.2–5.4).
+8. **Validate (synthetic only):** the favorability hot-spot should coincide with the synthetic ground-truth geothermal anomaly — the end-to-end correctness check. A real project has no such oracle; trust comes from calibration (§4.8) and the overlap/assumption-burden diagnostics instead.
 
 ---
 
 ## Decisions locked in
 
-1. **Non-destructive resampling.** Native property models are immutable; fusion produces *new* derived `PropertyModel`s bound to a `FusedGrid`. Resampled layers are cached and re-derivable, never overwritten.
+1. **Non-destructive resampling.** Native property models are immutable; fusion produces *new* derived `PropertyModel`s / `FusedLayer`s bound to a `FusedEarthModel` (doc 02 §11). Resampled layers are cached and re-derivable, never overwritten.
 2. **Footprint-honest fusion.** No extrapolation beyond a method's coverage/DOI — outside support is **nodata (NaN)**, never zero or edge-bleed. Each layer ships a coverage mask; transforms/cross-plots only act where required inputs are present.
 3. **Resampling method is support- and property-driven.** Trilinear (regular), block-mean (downsampling), barycentric (mesh), spline gridding (scattered); interpolate in **log space for orders-of-magnitude properties** (resistivity/conductivity/permeability) per the property registry. Categorical = nearest only.
 4. **Transform = declarative spec + pure Python `apply()`**, with typed inputs/outputs (unit-checked via `pint`), tunable params, and **semver versioning**; the registration mechanism is doc 08's, the contract is here.
 5. **Derived volumes are first-class `PropertyModel`s** — stored, served (doc 04), and rendered (doc 06) identically to ingested ones; they differ only by a provenance recipe and can be chained.
-6. **Favorability is a configurable multi-evidence index in `[0,1]`** with three swappable combination methods (**weighted-linear default**, fuzzy-logic, Bayesian/weights-of-evidence), per-evidence user-editable membership curves and weights — an explicit R&D instrument.
+6. **Favorability is a configurable multi-evidence index in `[0,1]`** with swappable combination methods — **fuzzy-conjunction default** (heat ∧ fluid ∧ permeability, non-compensatory), **weighted-linear as an explicit exploratory mode**, Bayesian/weights-of-evidence deferred — per-evidence user-editable membership curves and weights, plus **evidence-overlap and assumption-burden** honesty indicators. An explicit R&D instrument. *(Fuzzy-as-default raised by critique #11; flagged for user confirmation.)*
 7. **Uncertainty propagates end-to-end.** σ rides through resampling (with interpolation-variance inflation) and transforms (delta method default, optional Monte-Carlo); every derived/resampled layer ships a **paired confidence volume** that can modulate render opacity. Below-DOI / low-sensitivity / extrapolated-detail regions are **flagged**, never silently trusted.
 8. **All fusion compute is Python backend** (`xarray`/`numpy`/`scipy`/`verde`/`scikit-learn`/`pint`); **sync for selections ≤ 5 M cells, job-based for whole-grid** work (job API = doc 04). The browser only renders.
+9. **Rock-physics transforms are calibration-aware (scientific-honesty gate).** Every transform declares `assumptions` + `calibrationStatus ∈ uncalibrated|well_calibrated|lab_calibrated`. **Uncalibrated outputs are likelihood/proxy fields** (`UncertaintySpec.tier:"proxy"`), retitled "… likelihood," never deterministic measurements. **Well-log / core / geochem calibration (§4.8) is the centre of the workflow** — ingest probes → fit site-specific parameter *distributions* → re-run → promote status/tier, and only locally where probes constrain it. Synthetic data has truth fields for scoring; real projects do not.
 
-## Open questions for you
+## Resolved decisions (previously open — now confirmed in `DECISIONS.md`)
 
-1. **Which rock-physics relationships to prioritize for the starter library?** The §4.2 table is broad; building/calibrating all of them well is real work. *Why it matters:* it sets Phase-3 scope and which synthetic-earth properties (doc 05) must be forward-modeled to validate them.
-   - **(a)** Lead with **resistivity→temperature/fluid (Archie + Arps)** only — the canonical geothermal link — plus velocity→porosity. *(recommended default)*
-   - **(b)** Add alteration index + microseismic→fracture density up front (fuller "heat+fluid+perm" triad for favorability).
-   - **(c)** Full table including Waxman-Smits/dual-water and permeability proxies.
+These three forks are **decided** and stated above; recorded here for traceability (no longer open).
 
-2. **Default favorability combination method.** *Why it matters:* it shapes the headline product's behaviour and the UI controls. Weighted-linear is *compensatory* (a great temperature can mask absent permeability); fuzzy-AND is not — and geothermal genuinely needs the conjunction of heat **and** fluid **and** permeability.
-   - **(a)** **Weighted-linear** as the shipped default (transparent, simplest UI), with fuzzy/Bayesian available. *(recommended default — easiest to reason about first)*
-   - **(b)** **Fuzzy-AND** default (most physically faithful to the geothermal play conjunction).
-   - **(c)** Ship weighted + fuzzy together, no Bayesian until known-occurrence training data exists.
-
-3. **Uncertainty rigor for the MVP.** *Why it matters:* Monte-Carlo through transforms is the *correct* answer for nonlinear rock physics (Archie), but it is K× the compute and always job-based; the delta method is cheap and inline but approximate near nonlinearity.
-   - **(a)** **Delta-method everywhere for MVP**, expose Monte-Carlo as an opt-in job for specific transforms. *(recommended default)*
-   - **(b)** Monte-Carlo as default for flagged-nonlinear transforms, delta method elsewhere.
-   - **(c)** Delta-method only for Phase 3; defer Monte-Carlo entirely to a later phase.
+1. **Rock-physics starter library = the FULL §4.2 table** (resistivity→temp/fluid Archie+Arps, velocity→porosity, alteration index, microseismic→fracture density, Waxman-Smits/dual-water, permeability proxies). Sets Phase-3 scope; the synthetic earth (doc 05) must forward-model the supporting fields. *(Drafted default was the minimal resistivity→temp + velocity→porosity set.)*
+2. **Favorability ships weighted-linear AND fuzzy-logic; Bayesian deferred** until known-occurrence training data exists. **The default is fuzzy-conjunction** (heat ∧ fluid ∧ permeability, non-compensatory); weighted-linear is an explicit exploratory mode with a missing-required-evidence guard (§4.6). *(Fuzzy-as-default was raised by critique #11 and is flagged for user confirmation.)*
+3. **Uncertainty = delta-method everywhere, Monte-Carlo opt-in** per nonlinear transform (Archie is the canonical nonlinear case). Delta-method assumes input independence (doc 02 §6 `independence`); proxy/qualitative-tier inputs collapse confidence display to low/med/high (§5.1).

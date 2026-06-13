@@ -83,8 +83,34 @@ centerpiece** and the two backends differ most exactly there.
 
 > **Net:** WebGL2 is the floor and the default; WebGPU is a detected accelerator that
 > moves isosurfacing and resampling from server/fragment-hacks to client compute.
-> Flagged as **Q1** — confirm we may *require* a WebGL2-class GPU and treat WebGPU as
-> progressive enhancement.
+> **Resolved (DECISIONS.md):** render backend = **WebGL2 floor + WebGPU progressive
+> enhancement**. We may require a WebGL2-class GPU; WebGPU is never a hard gate. WebGPU
+> compute-path detail lives in the **Appendix (§13, later phase)** so it does not
+> dominate the first build.
+
+### 1.3 Renderer staging — build order (resolves critique #17)
+
+The renderer ships in stages; the **first viewer milestone is deliberately simple** so
+we prove the end-to-end path before building the streaming machinery.
+
+| Stage | Renderer scope | Volume backing |
+|---|---|---|
+| **M1 (first proof)** | **one resident volume** ray-marched + **orthogonal slice** + **clip box** + **transfer function**. WebGL2 only. No streaming, no LOD, no atlas. | a **single resident `Data3DTexture`** at a modest size (≤ a level that fits one upload, e.g. the coarse pyramid level or a ≤256³ crop) |
+| **M2+ (later)** | **brick-pool / page-table virtual-texturing + octree-LOD streaming** (§3.4): coarse-first refinement, fixed-VRAM atlas, screen-space-error LOD. | streamed bricks into a fixed brick-pool atlas |
+
+- **M1 is the proof:** load one property volume into a single `Data3DTexture`, march it,
+  cut it with one orthogonal slice that samples the *same* texture, clip with the box,
+  and drive a transfer function. This validates the Z-up frame, the shader, and the
+  Zarr→GPU path with the least moving parts.
+- The **brick-pool / page-table / virtual-texturing / octree-LOD** design in §3.4 is
+  **fully kept but explicitly LATER** — it is *not* part of the first proof. Treat §3.4
+  as the M2+ design, not an M1 requirement.
+- **Early-validation SPIKE (critique #5/#17):** the M1 milestone must **prove browser
+  Zarr v3 + Blosc/zstd decode maturity** (doc 02 §10.3 flags the same spike). If the JS
+  Zarr v3 + Blosc/zstd decoder is not ready, **fall back to server-side decode-to-raw**
+  via the doc 04 brick endpoint (`GET /property-models/{id}/bricks/...`) using the **same
+  chunk addressing** — so the on-disk layout (doc 02 §10.2) is unaffected; only *who
+  decodes* changes. The single-resident-volume M1 works either way.
 
 ---
 
@@ -243,16 +269,23 @@ must co-render in one frame. Options, selectable per scene:
 Blend operators exposed: **over, additive, max-intensity-projection (MIP), min-IP**.
 MIP is the standard "show me the hottest/most-conductive surface" view.
 
-### 3.4 Volumes larger than GPU memory — brick/LOD streaming (binds doc 04)
+### 3.4 Volumes larger than GPU memory — brick/LOD streaming (binds doc 04) — **M2+ (later stage)**
+
+> **Staging (critique #17):** everything in §3.4 is the **M2+** renderer (see §1.3). The
+> **M1 first proof uses a single resident `Data3DTexture`** — no brick pool, no page
+> table, no streaming. The advanced design below is kept but is explicitly *not* part of
+> the first milestone.
 
 A full ROI at fine resolution easily exceeds GPU 3D-texture limits (WebGL2 guarantees
 only 256³ `MAX_3D_TEXTURE_SIZE`; 512³–1024³ on real desktop GPUs) and VRAM. We rely on
-doc 04's **octree of bricks + multiresolution pyramid** and do **virtual-texture / brick
+doc 04's **octree-compatible multiresolution pyramid** and do **virtual-texture / brick
 streaming** client-side:
 
 ```
 View change ──▶ pick LOD per octree node (screen-space error / dist) 
-            ──▶ request needed bricks  GET /tiles/{volume}/{level}/{z}/{y}/{x}
+            ──▶ request needed bricks (doc 04 §6 addressing):
+                  GET /property-models/{id}/bricks/{level}/{t}/{bz}/{by}/{bx}
+                  (alias of the Zarr chunk key <property>/<level>/c/<bz>/<by>/<bx>, doc 02 §10.2)
             ──▶ decode → upload into a brick-pool 3D texture atlas (fixed VRAM)
             ──▶ update page-table 3D texture (node → atlas slot)
    ray-march ──▶ shader walks page table, samples resident bricks,
@@ -268,9 +301,12 @@ View change ──▶ pick LOD per octree node (screen-space error / dist)
 - **LOD selection:** screen-space-error driven (project brick size to pixels) plus
   distance and clip-box culling — only bricks intersecting the view frustum *and* the
   clip box, near enough to matter, are requested.
-- **What we need from doc 04 (flag):** brick dimensions, level/coord tiling scheme,
-  brick encoding (raw f32/f16 vs compressed), no-data convention, and the pyramid level
-  metadata (extents, value range per level). Listed in §12.
+- **Brick contract (now resolved — doc 04 §6 is authoritative):** brick = Zarr chunk,
+  **64³ cubic** (doc 04 §4.2), addressed `(id, level, t, bz, by, bx)` == the Zarr chunk
+  path `<property>/<level>/c/<bz>/<by>/<bx>` (doc 02 §10.2). Encoding = **Blosc+zstd**,
+  float32 canonical; **NaN fill** is the no-data convention (doc 02 §10.2). Per-level
+  extents + value ranges come from the `multiscales` block + catalog stats (doc 04 §5/§9).
+  We do not restate a divergent scheme; §12 just lists what the viewer reads.
 
 ---
 
@@ -280,29 +316,32 @@ Three primitives, all sampling the *same* property field:
 
 | Slice type | Geometry | Default sampling |
 |---|---|---|
-| **Orthogonal planes** | X / Y / Z planes, draggable along their axis | client-side from resident bricks |
-| **Arbitrary cross-section** | a tilted plane or a polyline-swept vertical curtain | server `slice` endpoint (doc 04) |
+| **Orthogonal planes** | X / Y / Z planes, draggable along their axis | client-side from the resident volume (M1) / resident bricks (M2+) |
+| **Arbitrary cross-section** | a tilted plane or a polyline-swept vertical curtain | server `slice` endpoint (`POST /property-models/{id}/slice`, doc 04 §9) |
 | **Fence diagram** | a set of connected vertical panels along a path | server `slice` per panel, draped as textured quads |
 
 ### 4.1 Sampling strategy — client-side vs server-side
 
-- **Client-side (preferred when bricks are resident):** an orthogonal/arbitrary plane
-  is a quad whose fragment shader **samples the same brick page-table 3D texture** as the
-  ray-marcher and applies the same transfer function. Zero extra fetch, instant drag,
-  perfectly registered with the volume. This is the default for orthogonal planes.
-- **Server-side (`GET /slice`, doc 04):** for **arbitrary** planes/fences, for volumes
-  **not loaded client-side** (too big / not the active layer), or for **publication-
-  quality** native-resolution sections, request a resampled 2D image/array from the
-  backend and drape it as a textured quad. Backend samples the native Zarr at full res
-  regardless of client LOD — sharper than the client path.
+- **Client-side (preferred when the volume is resident):** an orthogonal/arbitrary plane
+  is a quad whose fragment shader **samples the same 3D texture** as the ray-marcher (the
+  single resident `Data3DTexture` in M1; the brick page-table texture in M2+) and applies
+  the same transfer function. Zero extra fetch, instant drag, perfectly registered with
+  the volume. This is the default for orthogonal planes.
+- **Server-side (`POST /property-models/{id}/slice`, doc 04 §9):** for **arbitrary**
+  planes/fences, for volumes **not loaded client-side** (too big / not the active layer),
+  or for **publication-quality** native-resolution sections, request a resampled 2D
+  array from the backend and drape it as a textured quad. Backend samples the native Zarr
+  at full res regardless of client LOD — sharper than the client path.
 - **Decision:** **client-side for the common interactive case, server-side for arbitrary
   geometry and full-resolution.** A per-slice "HQ" button forces the server path.
 
-> **Need from doc 04 (flag):** `slice` request = volume id + plane definition
-> (point + normal, or polyline + depth range) + target resolution + colormap?-or-raw.
-> Prefer **raw values returned** so the client applies the live transfer function
-> (keeps slice and volume colors locked); a server-rendered-image mode is a fallback for
-> the no-client-GPU ladder.
+> **Slice contract (doc 04 §9.3 is authoritative — do not restate a divergent shape):**
+> the endpoint is **`POST /property-models/{id}/slice`** with a `SliceRequest`
+> (`plane` ∈ x/y/z/arbitrary, `position` or `origin`+`normal`, `level`, `t`, `bounds`,
+> `encoding`). **Slices default to raw float32 to the client** (`encoding:"f32"`, doc 04
+> Resolved / DECISIONS.md) so the client applies the live transfer function — keeping
+> slice and volume colours locked. The server-rendered `png` mode is an export/no-GPU
+> fallback, not the default.
 
 ---
 
@@ -312,9 +351,9 @@ Three primitives, all sampling the *same* property field:
 
 | Path | When | How |
 |---|---|---|
-| **Client, WebGPU compute** | iso value scrubbed interactively, volume resident | marching cubes in a compute shader over resident bricks → mesh in GPU buffers, no round-trip. Best UX. |
-| **Client, Web Worker** | WebGL2, modest volumes | MC in a worker (transferable typed arrays) off the resident/downsampled grid; throttle/debounce on scrub. |
-| **Server (`/isosurface`, doc 04)** | huge volumes, native-res surface, or no client GPU | backend runs MC (skimage/VTK) → streams **glTF**; client just loads the mesh. |
+| **Client, WebGPU compute** *(progressive enhancement — see Appendix §13)* | iso value scrubbed interactively, volume resident, `navigator.gpu` present | marching cubes in a compute shader over the resident volume → mesh in GPU buffers, no round-trip. Best UX. |
+| **Client, Web Worker** *(WebGL2 floor)* | WebGL2, modest volumes | MC in a worker (transferable typed arrays) off the resident/downsampled grid; throttle/debounce on scrub. |
+| **Server (`POST /property-models/{id}/isosurface`, doc 04 §9)** | huge volumes, native-res surface, or no client GPU | backend runs MC (skimage/VTK) → returns/streams **glTF** (inline if small, else `{job_id}` → `GET /features/{id}/geometry`); client just loads the mesh. |
 
 **Decision:** **interactive iso scrubbing on the client** (WebGPU compute where
 available, worker fallback) over the resident LOD; a **"bake at native resolution"**
@@ -382,8 +421,14 @@ property's color (flat iso color or a second property mapped onto the surface).
 
 ### 6.2 Basemap tiles — Web-Mercator reconciled at render time only
 
+> **Resolved (DECISIONS.md):** basemap = **DEM shaded-relief by default + optional online
+> tiles when available** (offline-safe). The georeferenced viewer never *requires* an
+> external tile provider; the shaded-relief DEM (§6.1) is the self-contained default and
+> online XYZ tiles are an opt-in enhancement.
+
 Per doc 01 §3/§6, **the model CRS is never Web Mercator**; tiles are a render-time-only
-concern. We drape imagery without contaminating the measurement frame:
+concern. When online tiles are enabled, we drape imagery without contaminating the
+measurement frame:
 
 ```
 For each terrain-mesh vertex (Engineering XYZ):
@@ -439,14 +484,16 @@ The client is the default renderer; we escalate to the backend (doc 04) when any
 
 | Trigger | Server action |
 |---|---|
-| WebGL2 unavailable / weak GPU | server renders volume/slice **images**, client shows them (2D-ish pan/zoom) |
-| Volume far exceeds brick-streaming budget at needed fidelity | server `slice`/`isosurface`/MIP image endpoints |
-| Native-resolution slice / isosurface ("HQ"/"bake") | server returns full-res slice array or glTF |
+| WebGL2 unavailable / weak GPU | server renders volume/slice **images** (`POST .../slice` with `encoding:"png"`), client shows them (2D-ish pan/zoom) |
+| Volume far exceeds brick-streaming budget at needed fidelity | server `POST .../slice` / `POST .../isosurface` (doc 04 §9) |
+| Native-resolution slice / isosurface ("HQ"/"bake") | server returns full-res slice array (`encoding:"f32"`) or glTF |
 | Headless export / report figure | server renders a fixed-view image |
 
 This is the bottom of the §1.2 fallback ladder. It is **graceful degradation, not a
 second app** — same layer state, same transfer functions, the backend just becomes the
-rasterizer. The **exact client-side ceiling** before auto-escalation is **Q2**.
+rasterizer. **Resolved (DECISIONS.md):** the client-side ceiling is **~512³ effective
+working set (~256–512 MB brick pool), 1–2 full-quality volumes**; beyond that we
+**auto-escalate to server-side** slice/isosurface/image rendering.
 
 ### 7.5 Memory management
 
@@ -577,26 +624,36 @@ viewer owns only the *linking and brushing*, not the statistics.
 
 | Phase | Viewer deliverable |
 |---|---|
-| 1 | Z-up scene, camera/controls, one ray-marched volume from streamed bricks, orthogonal slice planes, clip box, terrain (flat/synthetic). *End-to-end vertical slice.* |
-| 2 | Layer manager, multi-volume compositing/blending, transfer-function editor, registry-seeded defaults. |
+| 1 (**M1, first proof**) | Z-up scene, camera/controls, **one ray-marched volume held in a single resident `Data3DTexture`** (§1.3) at a modest size, orthogonal slice planes (same texture), clip box, transfer function, terrain (flat/synthetic). **Includes the Zarr v3 + Blosc/zstd browser-decode SPIKE** (server-decode fallback if not ready). *End-to-end vertical slice with the least moving parts.* |
+| 2 (**M2+**) | **Brick-pool / page-table / octree-LOD streaming** (§3.4); layer manager, multi-volume compositing/blending, transfer-function editor, registry-seeded defaults. |
 | 3 | Cross-plot brushing ↔ 3D highlight; uncertainty/fused-volume layers (doc 07 feeds). |
 | 4 | Horizons/faults (glTF), well tubes + log coloring, microseismic + InSAR + time slider, isosurfaces. |
 | 5 | Geomodel surfaces, well-planning overlays (target picks, trajectories, intersections — doc 09). |
-| — | WebGPU compute path (iso + slice resampling) lit up opportunistically once stable. |
+| — | **WebGPU compute path** (iso + slice resampling — Appendix §13) lit up opportunistically once stable; never gates the build. |
 
 ---
 
-## 12. Contract I need from the parallel docs (flagged)
+## 12. Contract from the parallel docs (now resolved — doc 04 §9 is authoritative)
 
-**From doc 04 (storage & serving):**
-- Brick tiling scheme: URL pattern, brick dims, octree level/coord convention, per-level
-  extents & value ranges, brick encoding (raw f16/f32 vs compressed), no-data convention.
-- `slice` endpoint: plane/polyline request, target resolution, **raw-array** (preferred)
-  vs server-rendered-image response.
-- `isosurface` endpoint: iso value(s) + volume + level → **glTF** mesh.
-- `sample` / stats: multi-property value at a point (panel sync), and value histograms
-  for transfer-function editors.
-- (Fallback) server-side **image render** of a volume/MIP for the no-GPU ladder.
+> **Doc 04 is the authoritative API + storage contract** (its §1, §9). The viewer
+> *references* these endpoints; it does **not** restate a divergent shape. The earlier
+> drafts of this doc used `GET /tiles/...` and `GET /slice` — both **superseded** by the
+> doc 04 endpoints below.
+
+**From doc 04 (storage & serving) — what the viewer reads:**
+- **Bricks (hot path):** `GET /property-models/{id}/bricks/{level}/{t}/{bz}/{by}/{bx}`
+  (or read the store directly via `GET /property-models/{id}/zarr/{path}`). Brick = 64³
+  Zarr chunk, address == chunk key `<property>/<level>/c/<bz>/<by>/<bx>` (doc 02 §10.2);
+  encoding Blosc+zstd float32; **NaN** no-data; per-level extents/value-range from the
+  `multiscales` block + catalog stats (doc 04 §5/§6/§9).
+- **Slice:** `POST /property-models/{id}/slice` (`SliceRequest`) → **raw f32 by default**
+  (`encoding:"f32"`), `png` for export/no-GPU (doc 04 §9.3).
+- **Isosurface:** `POST /property-models/{id}/isosurface` (`IsoRequest`) → inline **glTF**
+  if small, else `{job_id}` then `GET /features/{id}/geometry` (doc 04 §9.3).
+- **Sample / stats:** `POST /property-models/{id}/sample`, `POST /projects/{pid}/sample`
+  (multi-property panel sync); value histograms come from the catalog `stats_json`
+  exposed on `GET /property-models/{id}` (doc 04 §9.2).
+- (Fallback) server-side **image render** via the slice `png` encoding for the no-GPU ladder.
 
 **From doc 02 (data model) / doc 01 §5:**
 - Property-type registry fields the viewer reads to seed transfer functions: canonical
@@ -616,9 +673,10 @@ engineering→CRS→lat/lon transform for basemap UVs.
 1. **Three.js via react-three-fiber**, Zustand-driven declarative scene graph; analysis
    panels in Observable Plot / D3 (DOM, not WebGL).
 2. **WebGL2 is the default/floor; WebGPU is detected progressive enhancement** behind a
-   `RenderBackend` seam. WebGPU lights up client compute (interactive marching-cubes
-   isosurfaces, on-GPU slice resampling, histograms). Fallback ladder ends at server-side
-   rendering — never a blank screen.
+   `RenderBackend` seam (DECISIONS.md). WebGPU compute (interactive marching-cubes
+   isosurfaces, on-GPU slice resampling, histograms) is an **Appendix §13 later phase** —
+   it must not dominate the first build. Fallback ladder ends at server-side rendering —
+   never a blank screen.
 3. **Scene world space *is* the Engineering Frame** (doc 01): Z-up root
    (`DEFAULT_UP=(0,0,1)`), positions are Engineering metres straight to the GPU, float32
    safe via the floating origin. No CRS coordinates ever reach the GPU.
@@ -628,9 +686,12 @@ engineering→CRS→lat/lon transform for basemap UVs.
 5. **GPU single-pass ray-marching** with per-property transfer functions (colormap +
    opacity, seeded from the property-type registry); compositing modes over / additive /
    MIP / minIP; multi-volume blend supported.
-6. **Brick/LOD streaming** against doc 04's octree pyramid into a **fixed-VRAM brick-pool
-   atlas + page table** with coarse-first refinement — bounds client memory regardless of
-   full volume size; volumes are never blank, detail streams in.
+6. **Renderer staging (critique #17):** **M1 = one resident `Data3DTexture`** (single
+   modest volume + orthogonal slice + clip box + transfer function, WebGL2 only) is the
+   first proof. **M2+ = brick/LOD streaming** against doc 04's octree-compatible pyramid
+   into a **fixed-VRAM brick-pool atlas + page table** with coarse-first refinement —
+   bounds client memory regardless of full volume size; volumes are never blank, detail
+   streams in. Brick address == Zarr chunk key (doc 02 §10.2 / doc 04 §6).
 7. **Slices client-side from resident bricks** for the interactive case (same textures &
    transfer fn as the volume); **server `slice` for arbitrary geometry / native-res**.
 8. **Isosurfaces interactive on the client** (WebGPU compute or worker over resident LOD);
@@ -646,32 +707,44 @@ engineering→CRS→lat/lon transform for basemap UVs.
 
 ---
 
-## Open questions for you
+## 13. Appendix — WebGPU compute path (progressive enhancement, later phase)
 
-1. **WebGL2 floor vs WebGPU requirement.** Recommendation: **ship on WebGL2, treat WebGPU
-   as progressive enhancement** (lights up client-side isosurfacing & slice resampling),
-   server-render as the final fallback. *Why it matters:* gating on WebGPU would simplify
-   the renderer (compute everywhere) but exclude some machines/browsers in mid-2026 and
-   double the "must support both" surface if we hedge. Options: **(a) WebGL2 default +
-   WebGPU enhancement [recommended]**, (b) WebGPU-required (drop WebGL2, simpler, narrower
-   reach), (c) WebGL2-only (skip WebGPU; push iso/slice work to the server). Confirm (a)?
+> **Floor vs enhancement (DECISIONS.md):** **WebGL2 is the shipping floor**; everything in
+> this appendix is **progressive enhancement that must not dominate the first build**. It
+> lights up only when `navigator.gpu` is present, behind the `RenderBackend` seam (§1.2),
+> and always has a WebGL2 / server-side equivalent so it is never load-bearing.
 
-2. **Client-side performance ceiling before auto-escalating to server rendering.** What's
-   the largest volume / heaviest scene the *client* must handle before we switch that
-   layer to server-side slice/isosurface/image rendering? Recommendation: **client target
-   ~512³ effective working set via bricks (~256–512 MB pool), 1–2 full-quality volumes;
-   auto-escalate beyond that.** *Why it matters:* it sets the brick-pool size, the LOD
-   aggressiveness, and how much we invest in the server-render path early vs late.
-   Options: **(a) ~512³ / 256–512 MB, escalate beyond [recommended]**, (b) push the client
-   harder (~1024³, 1 GB+ — assumes strong GPUs, more tuning), (c) keep the client light
-   (~256³) and lean on server rendering sooner (simpler client, more backend work).
+When WebGPU is detected, the same scene gains a **compute** path that moves work off the
+server / off fragment-shader hacks onto the client GPU:
 
-3. **Default basemap/terrain dependency vs self-contained build.** Should the georeferenced
-   viewer depend on an **external XYZ basemap tile provider** (satellite/topo) at render
-   time, or stay self-contained (DEM-shaded relief only, basemap optional/local-cached)?
-   *Why it matters:* "local-first, single-user" (OVERVIEW) may mean offline; a remote tile
-   dependency breaks that and adds a provider/key/licensing concern. Options: **(a) DEM
-   relief default + optional online basemap when available [recommended]**, (b) require an
-   online basemap provider (richest context, needs network + key), (c) bundle/pre-cache
-   tiles per project on georeferencing (offline-safe, more storage & a fetch step in
-   doc 01/04). Confirm (a)?
+- **Marching-cubes isosurfaces in a compute shader** over the resident volume → mesh in
+  GPU buffers, no server round-trip (§5.1, best UX for iso scrubbing).
+- **On-GPU slice resampling** from bricks (arbitrary planes resampled in compute instead
+  of a `POST .../slice` round-trip when the volume is resident).
+- **Brick → 3D-texture transforms** and **histogram / transfer-function previews** computed
+  on-GPU (feeds §3.2 / §9.2 instead of the server stats call).
+- **Multi-volume binding** via bind-groups (cleaner N-volume compositing, §3.3).
+- **Streamline integration** (RK4 over a sampled vector volume, §5.5).
+
+**Three.js path:** `WebGPURenderer` + TSL node materials (compile to WGSL), with the
+hand-written GLSL ray-marcher kept as the guaranteed WebGL2 floor. None of the above is a
+build gate; each falls back to the WebGL2 fragment path or the doc 04 server endpoints
+(the §1.2 fallback ladder).
+
+---
+
+## Resolved (was: open questions)
+
+These were the doc's open forks; **DECISIONS.md** has settled them. Recorded here so the
+section is not mistaken for still-open work.
+
+1. **Render backend** → **WebGL2 floor + WebGPU progressive enhancement** (§1.2, §1.3,
+   Appendix §13). We may require a WebGL2-class GPU; WebGPU is never a hard gate.
+2. **Client-side performance ceiling** → **~512³ effective working set (~256–512 MB brick
+   pool), 1–2 full-quality volumes; auto-escalate to server-side beyond** (§7.4).
+3. **Basemap / terrain dependency** → **DEM shaded-relief default + optional online tiles
+   when available** (offline-safe); never requires an external tile provider (§6.1, §6.2).
+
+> **Genuinely still open (non-blocking):** sparse-octree vs dense-pyramid brick skipping is
+> deferred to doc 04 (its "Still open" note) — the M2+ streaming client (§3.4) reads the
+> same addressing either way, so it is not a viewer-side blocker.

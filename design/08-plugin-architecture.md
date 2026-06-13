@@ -36,31 +36,77 @@ of them at once (§5). So the framework is built around two layers:
 
 1. **Contributions** — the six atomic extension points above.
 2. **Method bundles** — a cohesive package that registers a coherent set of
-   contributions (an adapter + property type(s) + a default transfer function +
-   optionally a forward model + transform) as one installable unit.
+   contributions for a **`(method, submethod)`** pair from the canonical registry
+   (an adapter + property type(s) + a default transfer function + optionally a
+   forward model + transform) as one installable unit, each contribution
+   declaring its `executionMode` (§2.1).
 
 A new survey method is therefore: write one plugin package, declare a manifest,
 register its contributions. No edit to core ingestion, fusion, storage, or viewer
 code.
 
+> **Canonical keys, not invented ones.** Plugins do not mint method or
+> property-type strings. They register against the **canonical registries owned
+> by doc 02**: the `(method, submethod)` pairs from the `MethodKey` + `submethod`
+> registry (**doc 02 §2**) and `PropertyTypeKey`s from the canonical property-type
+> list (**doc 02 §1**). A plugin may *register a new* `PropertyTypeKey` (doc 02 §1
+> reserves `"<plugin-registered>"` for exactly this), but method/submethod values
+> come from the canonical set — no variants like `"seismic_reflection"`.
+
 ---
 
-## 2. Trust model & execution model (decide this first)
+## 2. Trust model & execution model (two independent axes)
+
+There are **two orthogonal axes** here, and conflating them is what makes docs
+08 and 10 look like they disagree. Keep them separate:
+
+- **Trust axis (security):** are plugins trusted code? — *yes, for the local
+  single-user case.* This is one global decision for the whole tool.
+- **Process-isolation axis (engineering):** does a given contribution run
+  *in the API process* or *in its own process/container/remote worker?* — this
+  is a **per-contribution** choice driven by **CPU weight and dependency
+  conflicts**, declared via `executionMode` (§2.1). It is *not* a security
+  decision; a `container` engine is still trusted, it just lives apart so its
+  heavy/conflicting deps (SimPEG, PyGIMLi) don't poison the API process.
+
+### 2.0 Trust boundary (security axis — one global decision)
 
 The OVERVIEW scopes this as **local-first, single-user** (§Context, §5). That
-fact dominates every plugin-security decision:
+fact dominates every plugin-*security* decision:
 
 | Property | Decision | Rationale |
 |---|---|---|
 | **Trust boundary** | Plugins are **trusted code**, same trust level as the app itself. | Single user installs them deliberately on their own machine, exactly like `pip install`. There is no untrusted multi-tenant input. |
-| **Execution** | **In-process**, in the FastAPI Python process (or its job workers). | Geoscience plugins need `numpy`/`xarray`/`segyio` arrays by reference; serializing volumes across a sandbox boundary would dominate runtime. |
-| **Isolation** | **None by default.** Plugins can import anything and touch the filesystem. | Matches the `pip`/entry-point ecosystem norm (SimPEG, lasio, ObsPy are all in-process). |
+| **Isolation (security)** | **None by default.** Plugins can import anything and touch the filesystem. | Matches the `pip`/entry-point ecosystem norm (SimPEG, lasio, ObsPy are all in-process). Process isolation (§2.1), where used, is for *dependency/CPU* reasons, **not** sandboxing. |
 | **Distribution** | Plugins are ordinary **Python packages** (built-in ones ship in-repo; third-party ones `pip install`). | Reuses Python packaging; no bespoke plugin format. |
 
 > **This is a deliberate, documented trust choice, not an oversight.** It is the
 > correct default for a local single-user R&D tool. It is also explicitly the
 > thing that must change before any **hosted/multi-user** mode (OVERVIEW §Context
 > "designed so it can grow"). The seam for that future is isolated to §11.
+
+### 2.1 Execution mode (process-isolation axis — per contribution)
+
+Every contribution declares an **`executionMode`** in its manifest. This is the
+field that reconciles this doc with **doc 10** (inversion): the in-process trust
+decision applies to **lightweight** contributions, while **heavy/conflicting
+engines opt into a separate process** — both docs now AGREE.
+
+| `executionMode` | For | Where it runs |
+|---|---|---|
+| **`in_process`** *(DEFAULT)* | Lightweight trusted adapters/transforms/property types/forward models — the common case. | The FastAPI Python process (or its in-proc job workers). Arrays passed by reference (`numpy`/`xarray`/`segyio`); no serialization cost. |
+| **`worker_process`** | Heavy CPU jobs that shouldn't block or bloat the API process. | A separate Python worker process (the RQ/Redis job tier, doc 04). |
+| **`container`** | Engines with **conflicting / heavy native deps** that can't share the API venv. | A dedicated container image. |
+| **`remote_worker`** | Heavy or conflicting-dependency engines — e.g. **SimPEG / PyGIMLi MT/EM inversion** (doc 10) — possibly on remote/GPU hardware. | A remote worker; only the `Field`/`RawFile` DTOs cross the boundary (§9). |
+
+> **Why this is not a security feature:** `in_process` is the default *because
+> the trust model is in-process-trusted*. The non-`in_process` modes exist for
+> **dependency isolation and CPU/GPU placement** (doc 10's compute-profile
+> decision), **not** to contain untrusted code. The future hosted/multi-user
+> sandbox (§11) is a *separate* change on the security axis.
+
+`executionMode` defaults to `in_process` when omitted, so existing lightweight
+bundles need no change.
 
 **What we *do* enforce even on trusted plugins** (cheap, catches bugs not
 attacks): manifest schema validation, interface conformance checks, version
@@ -152,11 +198,13 @@ behavioural contract is owned by the sibling doc.
 ### (a) Ingestion adapter — **[doc 03 binds here]**
 ```python
 class IngestionAdapter(Protocol):
-    method: str                 # "gravity", "mt", ...
+    method: str                 # canonical MethodKey (doc 02 §2): "gravity", "mt", ...
+    submethod: str | None       # canonical submethod (doc 02 §2), e.g. "reflection"
     formats: list[str]          # native format keys it claims (OVERVIEW §3 table)
     def sniff(self, raw: RawFile) -> float          # 0..1 confidence it can parse this
     def parse(self, raw: RawFile, ctx: IngestContext) -> NormalizedBundle
 # NormalizedBundle = { observations[], property_models[], features[], crs, units, provenance }
+# method/submethod MUST be canonical pairs from doc 02 §2 — never invented variants.
 ```
 Doc 03 owns parsing rules, the per-method format table, and normalization. This
 doc only fixes the signature and that it returns the OVERVIEW §3 normalized
@@ -194,7 +242,8 @@ the transform runs on. A transform *may* register a new output property type
 ### (d) Forward model — **[doc 05 binds here]**
 ```python
 class ForwardModel(Protocol):
-    method: str
+    method: str                 # canonical MethodKey (doc 02 §2)
+    submethod: str | None       # canonical submethod (doc 02 §2)
     def simulate(self, earth: GroundTruthEarth, geom: AcquisitionGeometry,
                  noise: NoiseSpec) -> RawFile     # emits a native-format file (OVERVIEW §8)
 ```
@@ -220,20 +269,27 @@ is *declared* on the backend and *resolved* to a React component on the client.
 ```python
 class InversionEngine(Protocol):
     key: str                   # "simpeg.dc", "pygimli.ert", "simpeg.joint"
-    methods: list[str]         # survey methods it can invert
+    methods: list[str]         # canonical MethodKeys it can invert (doc 02 §2)
     def invert(self, observations: list[Observation], mesh: Mesh,
                config: dict, job: JobHandle) -> PropertyModel
 ```
 Phase 6. Listed now so the registry shape doesn't change later: inversion is
 *just another contribution type*, run as a background job (OVERVIEW §5).
+Heavy/conflicting engines (SimPEG, PyGIMLi MT/EM) declare
+`executionMode: "container" | "remote_worker"` (§2.1) — this is exactly the
+process-isolation seam doc 10 relies on, and is why docs 08 and 10 agree.
 
 ---
 
 ## 5. The Method Bundle — how one plugin packages a whole survey method
 
 A survey method is the cohesive unit. A **method bundle** is one Python package
-that declares a **manifest** and registers its contributions together. This is
-the artifact a contributor actually creates to "add a new method."
+that declares a **manifest** and registers its contributions together for a
+canonical **`(method, submethod)`** pair (doc 02 §2): its (method, submethod),
+property type(s) (doc 02 §1), adapter, default transfer function, and optionally
+a forward model and/or transform — each contribution declaring its
+`executionMode` (§2.1). This is the artifact a contributor actually creates to
+"add a new method."
 
 ### 5.1 Manifest
 
@@ -245,13 +301,22 @@ PluginManifest {
   "version": "1.2.0",                 // semver of THIS plugin
   "api_version": "1.x",              // core plugin-API contract it targets (§9)
   "kind": "method-bundle",            // or "single-contribution"
+  "method":    "mt",                  // canonical MethodKey (doc 02 §2)
+  "submethod": null,                  // canonical submethod (doc 02 §2) or null
   "provides": {
     "adapters":        ["mt.edi", "mt.modem"],
-    "property_types":  ["resistivity"],         // may reuse an existing one
+    "property_types":  ["resistivity"],         // canonical PropertyTypeKeys (doc 02 §1); may reuse
     "transforms":      [],
     "forward_models":  ["mt"],
     "renderers":       ["volume.raymarch"],     // may reuse a core renderer
     "inversion_engines": []
+  },
+  // per-contribution executionMode (§2.1); default in_process if omitted.
+  // Lightweight adapters/transforms stay in_process; heavy engines opt out.
+  "execution_modes": {
+    "adapter:mt.edi":   "in_process",
+    "adapter:mt.modem": "in_process",
+    "forward:mt":       "worker_process"        // heavier MT forward → its own worker
   },
   "requires_property_types": ["resistivity"],   // capability negotiation (§7.3)
   "python_requires": ">=3.11",
@@ -372,29 +437,38 @@ all driven by this document. Property types declared once on the backend (doc 01
 §5) flow straight to the UI — units, default colormap, log/linear, range — with
 no client-side duplication.
 
-### 7.2 Client-side renderer/panel registry
+### 7.2 Client-side renderer/panel registry (a FIXED catalog)
 
 Renderers and custom panels have a *declarative* half (the `RendererSpec` from
 `/capabilities`) and an *implementation* half (React/Three.js code). The client
-keeps a parallel registry keyed by the same `renderer.key`:
+ships a **fixed catalog** of renderer/panel implementations, keyed by the same
+`renderer.key`; `/capabilities` only ever *selects among* the renderers the
+client already bundles. The client does **not** load any third-party JS.
 
 ```typescript
-// frontend: a client renderer registry mirrors the backend renderer keys
+// frontend: a FIXED, client-shipped renderer catalog mirrors the backend keys
 registerRenderer("volume.raymarch", RayMarchVolume);     // built-in (doc 06)
 registerRenderer("wellpath.tube",   WellPathTube);
 registerPanel("crossplot",          CrossPlotPanel);
 
-// resolution at runtime: capabilities.renderers drives which to mount
+// resolution at runtime: capabilities.renderers SELECTS which shipped renderer to mount
 function rendererFor(spec: RendererSpec): React.FC {
   return clientRenderers[spec.key] ?? FallbackRenderer;   // graceful unknown-key fallback
 }
 ```
 
-A **third-party frontend plugin** (rarer; most methods reuse `volume.raymarch`)
-ships as an ES module that calls `registerRenderer`/`registerPanel` and is loaded
-when its `ui_panel`/renderer key appears in capabilities. If a backend renderer
-key has no client implementation, the client uses `FallbackRenderer` and surfaces
-a warning — capability negotiation (§7.3) rather than a crash.
+Most methods reuse `volume.raymarch` plus the standard panels, so the fixed
+catalog covers the realistic set. If a backend renderer key has no client
+implementation in the catalog, the client uses `FallbackRenderer` and surfaces a
+warning — capability negotiation (§7.3) rather than a crash.
+
+> **Out of scope (later):** dynamically-loaded **third-party frontend ES-module
+> plugins** (a true client-side JS plugin host that fetches and runs renderer
+> code shipped by a backend plugin). This is explicitly **deferred** — it adds a
+> JS plugin loader plus client-side trust questions, with little payoff while the
+> fixed catalog covers ~all methods. The seam is preserved: a future loader would
+> register into the *same* `clientRenderers` keyspace, so adopting it later
+> changes only *how* a renderer implementation arrives, not the contract.
 
 ### 7.3 Capability negotiation
 
@@ -418,7 +492,9 @@ fast, and keep the system predictable. A failing plugin is **quarantined**
 | **Manifest schema** | Manifest parses against the `PluginManifest` JSON-Schema | quarantine + error |
 | **API-version compat** | `manifest.api_version` satisfies core's supported range (§9) | quarantine + error |
 | **Interface conformance** | Each contribution implements its Protocol (signatures, required attrs) | quarantine + error |
-| **Property-type integrity** | `canonical_unit` exists in the doc 01 `pint` registry; no key/unit clash with an existing property type | quarantine + error |
+| **Canonical method/submethod** | `(method, submethod)` is a valid pair in the doc 02 §2 registry (no invented variants) | quarantine + error |
+| **Property-type integrity** | `canonical_unit` exists in the doc 01 `pint` registry; property keys are canonical (doc 02 §1) or a newly-registered key; no key/unit clash with an existing property type | quarantine + error |
+| **executionMode validity** | each contribution's `executionMode` ∈ {`in_process`,`worker_process`,`container`,`remote_worker`} (default `in_process`) | quarantine + error |
 | **Key uniqueness** | No two adapters claim the same format with equal `sniff` confidence; no duplicate contribution keys | warn / deterministic tie-break |
 | **Dependency presence** | Declared deps importable | quarantine + actionable message |
 
@@ -481,19 +557,23 @@ run time:                                              ▼
 
 ## 11. The hosted/multi-user seam (future, isolated here)
 
-When the tool grows beyond local single-user (OVERVIEW §Context), the trust model
-of §2 must change — and *only* §2 changes, because everything routes through the
-registry:
+When the tool grows beyond local single-user (OVERVIEW §Context), the **security
+/ trust axis** of §2.0 must change — and *only* that axis changes, because
+everything routes through the registry:
 
 - **Plugin signing / allow-list** — install only vetted/signed plugins.
-- **Out-of-process execution** — run untrusted contributions in a subprocess or
-  container with a serialized array boundary (the `Field`/`RawFile` DTOs are
-  already the only thing crossing the boundary, by design of §9).
+- **Sandboxed execution for untrusted code** — run *untrusted* contributions
+  behind a security boundary. Note the **plumbing already exists**: the
+  `executionMode` machinery (§2.1) and the `Field`/`RawFile` DTOs (the only
+  things crossing a process boundary, by design of §9) mean a hosted mode reuses
+  the same out-of-process path — it adds a *trust* boundary on top, rather than a
+  new isolation mechanism.
 - **Resource limits & quotas** per plugin job.
 
-No interface in §4, no manifest field, and no provenance/capabilities contract
-needs to change to add this — that is the payoff of routing all extensibility
-through one registry.
+No interface in §4, no manifest field (`executionMode` already exists), and no
+provenance/capabilities contract needs to change to add this — that is the payoff
+of routing all extensibility through one registry and keeping trust and
+process-isolation as separate axes.
 
 ---
 
@@ -502,20 +582,29 @@ through one registry.
 1. **One registry, six extension points** (adapter, property type, transform,
    forward model, renderer, inversion engine). A new survey method = one plugin
    package + manifest; **no core changes**.
-2. **In-process, trusted execution** for the local-first single-user tool.
-   Plugins are ordinary Python packages at the app's own trust level. The
-   hosted/multi-user sandbox is a future change isolated to §2/§11.
+2. **In-process, trusted execution** for the local-first single-user tool
+   (security axis). Plugins are ordinary Python packages at the app's own trust
+   level. **Separately**, each contribution declares an **`executionMode`**
+   (`in_process` default | `worker_process` | `container` | `remote_worker`,
+   §2.1) — a *process-isolation* axis for CPU weight / conflicting deps, **not**
+   security. Lightweight adapters/transforms stay `in_process`; heavy engines
+   (SimPEG/PyGIMLi, doc 10) opt into a worker/container/remote — so docs 08 and 10
+   agree. The hosted/multi-user sandbox is a future security change isolated to
+   §2.0/§11.
 3. **Dual discovery → one registry:** first-party plugins use **decorators**
    (zero ceremony); third-party plugins use **`importlib.metadata` entry points**
    (group `geosim.plugins`). Config is an *override/disable* layer only, never the
    primary enable path.
-4. **Method Bundle** is the cohesive unit: one package bundles adapter +
-   property type(s) + default transfer function + optional forward model +
-   optional transform, declared in one **manifest** (validated at load).
+4. **Method Bundle** is the cohesive unit: one package, for a canonical
+   **`(method, submethod)`** pair (doc 02 §2), bundles adapter + property type(s)
+   (doc 02 §1) + default transfer function + optional forward model + optional
+   transform, each with an `executionMode`, declared in one **manifest**
+   (validated at load).
 5. **`/api/capabilities`** is the single backend→frontend contract; the React app
    is method-agnostic and driven entirely by it. Renderers are declared on the
-   backend and resolved to React components by key on the client, with graceful
-   fallback for unknown keys.
+   backend and resolved by key to one of the client's **fixed-catalog** React
+   components, with graceful fallback for unknown keys. **No third-party JS** is
+   loaded; dynamic ES-module frontend plugins are deferred (out of scope).
 6. **Two version axes:** plugin version (in provenance, per artifact) and plugin
    **API version** (the stability promise). Plugins may import **only**
    `geosim.plugins`; all other core is private and free to evolve.
@@ -525,8 +614,9 @@ through one registry.
    automatically (binds doc 02).
 
 ### Cross-doc bindings (siblings must conform to these seams)
+- **Doc 02 §2** — the **canonical `MethodKey` + `submethod` registry**; plugins register `(method, submethod)` pairs from it, never invented variants.
 - **Doc 03** — `IngestionAdapter.parse → NormalizedBundle`; `sniff` for format routing.
-- **Doc 01 §5 / Doc 02** — the `PropertyType` declarative registry; canonical units come from the doc 01 `pint` registry.
+- **Doc 02 §1 / Doc 01 §5** — the canonical `PropertyTypeKey` list (doc 02 §1) + the `PropertyType` declarative registry; plugins register keys from it (or a new `<plugin-registered>` key); canonical units come from the doc 01 `pint` registry.
 - **Doc 07** — `Transform` (inputs/outputs as property-type keys); may register new output property types.
 - **Doc 05** — `ForwardModel.simulate` must emit a file the *same method's* adapter ingests (closes the §8 round-trip).
 - **Doc 06** — backend `RendererSpec` ↔ client renderer registry, matched by `key`.
@@ -534,29 +624,20 @@ through one registry.
 
 ---
 
-## Open questions for you
+## Resolved decisions (was "Open questions")
 
-1. **Backend plugin discovery mechanism — confirm the decorator + entry-point
-   hybrid.** *Why it matters:* it sets the developer ergonomics for every new
-   method and whether third-party plugins are first-class. Options: (a) **hybrid
-   — decorators for first-party, entry-points for third-party** *(recommended
-   default; best ergonomics + clean install)*; (b) entry-points only (uniform but
-   heavier for in-repo dev); (c) config-driven manifest list (explicit but
-   contradicts "no core changes").
+These three forks are **decided** (see `DECISIONS.md` → doc 08) and are no longer
+open:
 
-2. **In-process vs sandboxed execution & trust model.** *Why it matters:* it
-   fixes the security posture and how hard the future hosted mode is. Options:
-   (a) **in-process, trusted, no isolation** *(recommended default for local
-   single-user; matches the SimPEG/lasio ecosystem and avoids array-serialization
-   cost)*; (b) in-process but with a capability allow-list/signing from day one
-   (more ceremony, little benefit while single-user); (c) out-of-process sandbox
-   now (premature; large perf + complexity cost).
-
-3. **How much frontend code may a plugin ship?** *Why it matters:* decides
-   whether the frontend stays fully method-agnostic (capabilities-driven only) or
-   becomes a true plugin host that loads third-party JS. Options: (a) **backend
-   declares renderers/transfer-functions; client implements a fixed catalog and
-   reuses them by key — no third-party JS for now** *(recommended default;
-   simplest, covers ~all methods via `volume.raymarch` + standard panels)*;
-   (b) allow dynamically-loaded ES-module frontend plugins (maximally extensible,
-   but adds a JS plugin loader + trust questions on the client).
+1. **Backend plugin discovery** — **hybrid**: decorators for first-party,
+   `importlib.metadata` entry points (group `geosim.plugins`) for third-party,
+   both converging on one registry (§3.1). Config is an override/disable layer
+   only.
+2. **Execution & trust** — **in-process, trusted, no isolation** for the local
+   single-user case (§2.0). Process isolation is a *separate, per-contribution*
+   axis (`executionMode`, §2.1) driven by CPU weight / dependency conflicts, not
+   security; the hosted/multi-user sandbox is the future seam in §11.
+3. **Frontend extensibility** — backend declares renderers/transfer-functions via
+   `/api/capabilities`; the client ships a **fixed renderer catalog** and selects
+   among them by key (§7.2). **No third-party JS for now**; dynamic ES-module
+   frontend plugins are explicitly deferred (out of scope).
