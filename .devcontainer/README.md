@@ -9,7 +9,7 @@ container plus **PostgreSQL/PostGIS** and **Redis** service containers, and
 
 | Service | Image | Purpose | Port |
 |---|---|---|---|
-| `app` | `Dockerfile` (Python 3.12 + Node 20 + GDAL/PROJ + Claude Code) | where you develop/run code | 5173, 8000, 9181 |
+| `app` | `Dockerfile` (Python 3.12 + Node 20 + GDAL/PROJ + Claude Code + Gas Town) | where you develop/run code | 5173, 8000, 9181 |
 | `db` | `postgis/postgis:16-3.4` | catalog DB (doc 04) | 5432 |
 | `redis` | `redis:7-alpine` | RQ job queue (doc 04) | 6379 |
 
@@ -46,6 +46,27 @@ claude
 
 If you'd rather use an API key, export `ANTHROPIC_API_KEY` on the host before
 launching; it's passed through to the container.
+
+## Gas Town (`gt`)
+
+[Gas Town](https://github.com/gastownhall/gastown) is preinstalled, so `gt` is on
+the `PATH` as soon as the container is up. Its dependencies are provisioned for you:
+
+| Tool | How it's installed | Why |
+|---|---|---|
+| `gt` | `npm i -g @gastown/gt` (post-create) | the CLI itself (prebuilt native binary) |
+| `bd` | `npm i -g @beads/bd` (post-create) | beads — gt's issue/memory store |
+| `dolt` | official installer (Dockerfile) | gt's versioned datastore |
+| `tmux`, `sqlite3` | apt (Dockerfile) | session multiplexing + local stores |
+| `git`, `claude` | base image / post-create | worktrees + default agent runtime |
+
+Bootstrap a workspace the first time you use it:
+
+```bash
+gt install ~/gt --git && cd ~/gt
+gt rig add myproject https://github.com/you/repo.git
+gt mayor attach
+```
 
 ## Connecting to the services
 
