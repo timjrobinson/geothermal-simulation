@@ -119,6 +119,30 @@ export function sampleAt(vol: DecodedVolume, i: number, j: number, k: number): n
   return vol.data[(k * ny + j) * nx + i];
 }
 
+// NaN-aware histogram over [lo, hi] with `bins` buckets (doc 06 §9.2 — opacity curve over
+// the value histogram). NaNs are skipped; values are clamped into the end buckets. Pure +
+// fast (single pass) so it is fine to compute client-side from the resident volume.
+export function histogram(
+  data: Float32Array,
+  lo: number,
+  hi: number,
+  bins = 48,
+): number[] {
+  const out = new Array<number>(bins).fill(0);
+  const span = hi - lo;
+  if (!(span > 0) || bins <= 0) return out;
+  const scale = bins / span;
+  for (let i = 0; i < data.length; i++) {
+    const v = data[i];
+    if (!Number.isFinite(v)) continue;
+    let b = Math.floor((v - lo) * scale);
+    if (b < 0) b = 0;
+    else if (b >= bins) b = bins - 1;
+    out[b] += 1;
+  }
+  return out;
+}
+
 // NaN-aware finite min/max over the buffer (a fallback when meta.stats is absent).
 // Returns null if the buffer is entirely NaN/empty.
 export function finiteMinMax(data: Float32Array): { min: number; max: number } | null {

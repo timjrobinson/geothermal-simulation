@@ -46,6 +46,7 @@ uniform float uLog;              // 1.0 = log scaling, 0.0 = linear
 uniform float uOpacityGain;
 uniform int   uSteps;            // max ray-march steps
 uniform float uRefStep;          // reference step (m) for opacity correction
+uniform int   uBlend;            // 0=over (alpha), 1=additive, 2=MIP, 3=minIP (doc 06 §3.3)
 
 // Ray/box intersection (slab method). Returns vec2(tNear, tFar); tFar<tNear => miss.
 vec2 intersectBox(vec3 ro, vec3 rd, vec3 bmin, vec3 bmax) {
@@ -91,6 +92,10 @@ void main() {
   float dt = maxDim / float(uSteps);
 
   vec4 acc = vec4(0.0);
+  // MIP / minIP track the extremum sample (doc 06 §3.3); seed minIP high so any sample wins.
+  float extN = (uBlend == 3) ? 1.0 : 0.0;     // normalized-t extremum
+  vec4  extC = vec4(0.0);                      // colour at the extremum
+  bool  hit  = false;
   float t = t0;
   for (int i = 0; i < 4096; ++i) {
     if (i >= uSteps) break;
@@ -102,14 +107,31 @@ void main() {
     if (isnan(raw)) continue;                 // no-data skip (doc 06 §3.1)
     float vn = applyScaling(raw);
     vec4 c = texture(uTransferFn, vec2(vn, 0.5));
-    // Opacity-correct for the actual step size (doc 06 §3.1).
-    float a = 1.0 - pow(1.0 - clamp(c.a * uOpacityGain, 0.0, 1.0), dt / uRefStep);
-    acc.rgb += (1.0 - acc.a) * a * c.rgb;
-    acc.a   += (1.0 - acc.a) * a;
-    if (acc.a > 0.98) break;                  // early ray termination
+    if (uBlend == 2) {                        // MIP — keep the max value
+      if (!hit || vn > extN) { extN = vn; extC = c; }
+      hit = true;
+    } else if (uBlend == 3) {                 // minIP — keep the min value
+      if (!hit || vn < extN) { extN = vn; extC = c; }
+      hit = true;
+    } else {                                  // over / additive — accumulate front-to-back
+      float a = 1.0 - pow(1.0 - clamp(c.a * uOpacityGain, 0.0, 1.0), dt / uRefStep);
+      if (uBlend == 1) {                      // additive — emission, no occlusion
+        acc.rgb += a * c.rgb;
+        acc.a   = max(acc.a, a);
+      } else {                                // over — front-to-back alpha
+        acc.rgb += (1.0 - acc.a) * a * c.rgb;
+        acc.a   += (1.0 - acc.a) * a;
+        if (acc.a > 0.98) break;              // early ray termination
+      }
+    }
+  }
+  if (uBlend == 2 || uBlend == 3) {
+    if (!hit) discard;
+    fragColor = vec4(extC.rgb, clamp(extC.a * uOpacityGain, 0.0, 1.0));
+    return;
   }
   if (acc.a <= 0.0) discard;
-  fragColor = acc;
+  fragColor = vec4(acc.rgb, clamp(acc.a, 0.0, 1.0));
 }
 `;
 

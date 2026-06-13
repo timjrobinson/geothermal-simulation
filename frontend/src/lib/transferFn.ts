@@ -20,6 +20,13 @@ export interface TransferFnSpec {
   scaling: ScalingMode; // log vs linear value→t (doc 06 §3.1)
   opacity: number; // global opacity gain 0..1 (uOpacityGain)
   invert: boolean; // flip the colour ramp
+  // "Isolate band" (doc 06 §9.2): when enabled, only the normalized-t window
+  // [bandMin, bandMax] keeps its opacity; everything outside is forced transparent so a
+  // single value range (e.g. the conductive anomaly) is isolated. Optional/back-compat:
+  // absent => no band (full ramp opaque as before).
+  bandEnabled?: boolean;
+  bandMin?: number; // normalized t in [0,1]
+  bandMax?: number; // normalized t in [0,1]
 }
 
 export const LUT_SIZE = 256;
@@ -32,13 +39,19 @@ export function bakeTransferFnRGBA(spec: TransferFnSpec): Uint8Array {
   const cm = resolveColormap(spec.colormap);
   const rgb = bakeColormapRGB(cm, LUT_SIZE);
   const out = new Uint8Array(LUT_SIZE * 4);
+  // "Isolate band" window (doc 06 §9.2). Tolerant of swapped/absent bounds.
+  const bandOn = spec.bandEnabled === true;
+  const b0 = Math.min(spec.bandMin ?? 0, spec.bandMax ?? 1);
+  const b1 = Math.max(spec.bandMin ?? 0, spec.bandMax ?? 1);
   for (let i = 0; i < LUT_SIZE; i++) {
     const src = spec.invert ? LUT_SIZE - 1 - i : i;
     out[i * 4 + 0] = rgb[src * 3 + 0];
     out[i * 4 + 1] = rgb[src * 3 + 1];
     out[i * 4 + 2] = rgb[src * 3 + 2];
     const t = LUT_SIZE > 1 ? i / (LUT_SIZE - 1) : 0;
-    out[i * 4 + 3] = Math.round(t * spec.opacity * 255);
+    let a = t * spec.opacity;
+    if (bandOn && (t < b0 || t > b1)) a = 0; // outside the isolate band -> transparent
+    out[i * 4 + 3] = Math.round(a * 255);
   }
   return out;
 }

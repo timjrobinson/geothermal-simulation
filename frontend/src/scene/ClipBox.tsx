@@ -19,7 +19,7 @@ const IS_MIN: Record<Face, boolean> = {
 };
 
 export function ClipBox() {
-  const aabb = useViewer((s) => s.aabb);
+  const aabb = useViewer((s) => s.sceneAABB);
   const clip = useViewer((s) => s.clip);
   const setClip = useViewer((s) => s.setClip);
   const { gl } = useThree();

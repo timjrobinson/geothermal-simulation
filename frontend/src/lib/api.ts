@@ -37,6 +37,79 @@ export interface PropertyModelMeta {
   hasSigma: boolean;
 }
 
+// ── Dataset discovery (doc 06 §9.1 datasets→layers) ──────────────────────────────────
+// The "open project" flow lists ingested property models as addable layers. It reads
+// GET /projects (project list) and GET /projects/{pid}/artifacts (catalog discovery —
+// the ingested artifacts of a project). Shapes mirror the backend ProjectSummary; the
+// artifacts catalog is read defensively (field-name tolerant) since the catalog row shape
+// is the discovery contract, not a typed M1 schema. When no backend is reachable these
+// reject and the UI falls back to the in-memory mock layer (still works offline).
+
+export interface ProjectSummary {
+  id: string;
+  name: string;
+  description?: string | null;
+  created_at?: number;
+  updated_at?: number;
+}
+
+// A discovered property-model artifact addable as a layer. We only need id/property/unit
+// to list it; the full meta is fetched lazily on add via fetchMeta.
+export interface PropertyModelArtifact {
+  id: string;
+  property: string;
+  canonicalUnit?: string | null;
+}
+
+export async function fetchProjects(): Promise<ProjectSummary[]> {
+  const r = await fetch(`/projects`);
+  if (!r.ok) throw new Error(`projects fetch failed: ${r.status} ${r.statusText}`);
+  const body = (await r.json()) as ProjectSummary[];
+  return Array.isArray(body) ? body : [];
+}
+
+// Discover the property-model artifacts of a project. The catalog response is tolerant of
+// a few shapes: an array of rows, or { artifacts: [...] } / { property_models: [...] }.
+// Each row is normalized to { id, property, canonicalUnit }.
+export async function fetchProjectArtifacts(
+  pid: string,
+): Promise<PropertyModelArtifact[]> {
+  const r = await fetch(`/projects/${encodeURIComponent(pid)}/artifacts`);
+  if (!r.ok) throw new Error(`artifacts fetch failed: ${r.status} ${r.statusText}`);
+  const body = (await r.json()) as unknown;
+  return normalizeArtifacts(body);
+}
+
+// Pure normalizer (exported for unit tests): coerce a catalog response into a flat list
+// of property-model artifacts, keeping only volume-like property models.
+export function normalizeArtifacts(body: unknown): PropertyModelArtifact[] {
+  let rows: unknown[] = [];
+  if (Array.isArray(body)) rows = body;
+  else if (body && typeof body === "object") {
+    const o = body as Record<string, unknown>;
+    if (Array.isArray(o.artifacts)) rows = o.artifacts;
+    else if (Array.isArray(o.property_models)) rows = o.property_models;
+    else if (Array.isArray(o.propertyModels)) rows = o.propertyModels;
+    else if (Array.isArray(o.items)) rows = o.items;
+  }
+  const out: PropertyModelArtifact[] = [];
+  for (const row of rows) {
+    if (!row || typeof row !== "object") continue;
+    const o = row as Record<string, unknown>;
+    // A property-model artifact has an id and a property; tolerate kind/type markers.
+    const kind = (o.kind ?? o.type ?? o.artifact_type) as string | undefined;
+    if (kind != null && !/property[_-]?model|volume/i.test(kind)) continue;
+    const id = (o.id ?? o.pm_id ?? o.property_model_id) as string | undefined;
+    if (typeof id !== "string") continue;
+    const property = (o.property ?? o.name ?? "property") as string;
+    const canonicalUnit = (o.canonicalUnit ?? o.canonical_unit ?? null) as
+      | string
+      | null;
+    out.push({ id, property, canonicalUnit });
+  }
+  return out;
+}
+
 const JSON_HEADER = (h: Headers, k: string): unknown => {
   const v = h.get(k);
   return v == null ? null : JSON.parse(v);

@@ -11,7 +11,7 @@
 // Default (no params) uses ?mock so the build is self-contained and shows something.
 
 import { useEffect, useState } from "react";
-import { useViewer, type Capabilities } from "./store";
+import { useViewer, selectedLayer, type Capabilities } from "./store";
 import { fetchMeta, fetchVolume } from "./lib/api";
 import { makeMockVolume } from "./lib/mockVolume";
 import { Scene } from "./scene/Scene";
@@ -19,11 +19,17 @@ import { ControlPanel } from "./ui/ControlPanel";
 
 export function App() {
   const loadData = useViewer((s) => s.loadData);
+  const addTerrainLayer = useViewer((s) => s.addTerrainLayer);
   const setLoading = useViewer((s) => s.setLoading);
   const setError = useViewer((s) => s.setError);
   const loading = useViewer((s) => s.loading);
   const error = useViewer((s) => s.error);
-  const meta = useViewer((s) => s.meta);
+  const layerCount = useViewer((s) => s.layerOrder.length);
+  const layer = useViewer(selectedLayer);
+  const meta = layer?.meta ?? null;
+  const sceneAABB = useViewer((s) => s.sceneAABB);
+  const layers = useViewer((s) => s.layers);
+  const layerOrder = useViewer((s) => s.layerOrder);
   const setCapabilities = useViewer((s) => s.setCapabilities);
   const capabilities = useViewer((s) => s.capabilities);
 
@@ -59,6 +65,29 @@ export function App() {
     };
   }, [loadData, setLoading, setError]);
 
+  // Auto-add the ground-surface terrain layer once a volume scene AABB is known (doc 06
+  // §6): the surface spans the data footprint at the project's surfaceModel elevation, and
+  // the subsurface volume hangs beneath it. Runs once (skipped if a terrain layer exists).
+  useEffect(() => {
+    if (!sceneAABB) return;
+    const hasTerrain = layerOrder.some((id) => layers[id]?.kind === "terrain");
+    const hasVolume = layerOrder.some((id) => layers[id]?.kind === "volume");
+    if (hasTerrain || !hasVolume) return;
+    const frame = (meta?.frame as Record<string, unknown> | undefined) ?? undefined;
+    const surfaceModelSpec =
+      (frame?.surfaceModel as string | null | undefined) ?? "flat:0";
+    addTerrainLayer({
+      surfaceModelSpec,
+      extent: {
+        xmin: sceneAABB.min[0],
+        xmax: sceneAABB.max[0],
+        ymin: sceneAABB.min[1],
+        ymax: sceneAABB.max[1],
+      },
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sceneAABB]);
+
   // Minor M0 capabilities fetch (footer badge); failure is non-fatal.
   useEffect(() => {
     fetch("/api/capabilities")
@@ -86,7 +115,8 @@ export function App() {
           Geothermal Underground Simulator
         </div>
         <div style={{ fontSize: 12, opacity: 0.7, color: "#cdd6f4" }}>
-          M1 viewer — single resident volume {mode && `(${mode})`}
+          Multi-layer viewer — {layerCount} layer{layerCount === 1 ? "" : "s"}{" "}
+          {mode && `(${mode})`}
           {loading && " — loading…"}
           {meta && ` — ${meta.shape.join("×")} (z,y,x)`}
         </div>

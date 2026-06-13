@@ -9,7 +9,8 @@ import { Canvas, useThree } from "@react-three/fiber";
 import { CameraControls } from "@react-three/drei";
 import * as THREE from "three";
 import { useViewer } from "../store";
-import { VolumeLayer } from "./VolumeLayer";
+import { VolumeLayers } from "./VolumeLayer";
+import { TerrainLayers } from "./TerrainLayer";
 import { SliceLayer } from "./SliceLayer";
 import { ClipBox } from "./ClipBox";
 import { aabbCenter, aabbSize } from "../lib/volume";
@@ -20,7 +21,7 @@ THREE.Object3D.DEFAULT_UP.set(0, 0, 1);
 // Frame the camera obliquely down into the volume AABB when data first loads (doc 06 §2.2).
 function CameraFramer() {
   const controls = useThree((s) => s.controls) as CameraControls | null;
-  const aabb = useViewer((s) => s.aabb);
+  const aabb = useViewer((s) => s.sceneAABB);
   const framed = useRef(false);
 
   useEffect(() => {
@@ -47,14 +48,19 @@ export function Scene() {
       gl={{ antialias: true, alpha: false, logarithmicDepthBuffer: true }}
       camera={{ up: [0, 0, 1], near: 0.1, far: 1e6, position: [3000, -3000, 2000] }}
       style={{ position: "absolute", inset: 0 }}
+      // Per-material clippingPlanes (terrain mesh clip, doc 06 §2.4) require local clipping.
+      onCreated={({ gl }) => {
+        gl.localClippingEnabled = true;
+      }}
     >
       <color attach="background" args={["#0a0e14"]} />
       <hemisphereLight args={["#cdd6f4", "#1e1e2e", 0.9]} />
       <directionalLight position={[1, -1, 1]} intensity={0.6} />
       <ambientLight intensity={0.25} />
 
+      <TerrainLayers />
       <SliceLayer />
-      <VolumeLayer />
+      <VolumeLayers />
       <ClipBox />
 
       <axesHelper args={[1000]} />

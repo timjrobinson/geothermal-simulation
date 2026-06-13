@@ -1,18 +1,31 @@
-// Transfer-function / control panel (doc 06 §9.2, §10). DOM overlay (not WebGL) driving
-// the Zustand store: colormap pick, domain min/max, log toggle, opacity, slice axis+pos,
-// clip box reset, step count. All edits push store state which the scene shaders mirror
-// live (no volume refetch — doc 06 §9.2).
+// Control panel (doc 06 §9, §10). DOM overlay (not WebGL) driving the Zustand store. It
+// hosts three sections:
+//   1. Layer manager (doc 06 §9.1): add/remove/reorder/toggle/opacity/blend per layer.
+//   2. Per-layer transfer-function editor (doc 06 §9.2) for the selected layer.
+//   3. Global orthogonal slice (§4) + clip box (§2.4) controls.
+// The "open project" discovery flow (doc 06 §9.1) is a togglable sub-panel. All edits push
+// store state which the scene shaders mirror live (no volume refetch — doc 06 §9.2).
 
-import { useViewer } from "../store";
-import { COLORMAP_NAMES } from "../lib/colormaps";
+import { useState } from "react";
+import { useViewer, selectedLayer } from "../store";
+import { BLEND_MODES, type BlendMode } from "../lib/layers";
+import { TransferFnEditor } from "./TransferFnEditor";
+import { DiscoveryPanel } from "./DiscoveryPanel";
 
-const row: React.CSSProperties = { display: "flex", alignItems: "center", gap: 8, marginBottom: 8 };
-const label: React.CSSProperties = { width: 92, fontSize: 12, opacity: 0.8 };
+const row: React.CSSProperties = {
+  display: "flex",
+  alignItems: "center",
+  gap: 8,
+  marginBottom: 8,
+};
+const label: React.CSSProperties = { width: 84, fontSize: 12, opacity: 0.8 };
 const panel: React.CSSProperties = {
   position: "absolute",
   top: 12,
   right: 12,
-  width: 280,
+  width: 300,
+  maxHeight: "calc(100vh - 24px)",
+  overflowY: "auto",
   padding: 14,
   background: "rgba(17,22,33,0.92)",
   border: "1px solid #313244",
@@ -22,13 +35,164 @@ const panel: React.CSSProperties = {
   fontSize: 13,
   zIndex: 10,
 };
+const iconBtn: React.CSSProperties = {
+  background: "#313244",
+  color: "#cdd6f4",
+  border: "none",
+  borderRadius: 4,
+  padding: "1px 6px",
+  cursor: "pointer",
+  fontSize: 12,
+  lineHeight: "16px",
+};
+const hr: React.CSSProperties = {
+  border: "none",
+  borderTop: "1px solid #313244",
+  margin: "10px 0",
+};
+
+function LayerManager() {
+  const layers = useViewer((s) => s.layers);
+  const layerOrder = useViewer((s) => s.layerOrder);
+  const selectedLayerId = useViewer((s) => s.selectedLayerId);
+  const selectLayer = useViewer((s) => s.selectLayer);
+  const removeLayer = useViewer((s) => s.removeLayer);
+  const moveLayer = useViewer((s) => s.moveLayer);
+  const setLayerVisible = useViewer((s) => s.setLayerVisible);
+  const setLayerOpacity = useViewer((s) => s.setLayerOpacity);
+  const setLayerBlend = useViewer((s) => s.setLayerBlend);
+
+  // Top of the list == top of the composite (drawn last). layerOrder is bottom→top.
+  const ordered = [...layerOrder].reverse();
+
+  if (ordered.length === 0) {
+    return (
+      <div style={{ fontSize: 12, opacity: 0.6, marginBottom: 8 }}>
+        No layers — open a project or add the mock layer.
+      </div>
+    );
+  }
+
+  return (
+    <div style={{ marginBottom: 4 }}>
+      {ordered.map((id) => {
+        const l = layers[id];
+        if (!l) return null;
+        const sel = id === selectedLayerId;
+        return (
+          <div
+            key={id}
+            style={{
+              border: sel ? "1px solid #89b4fa" : "1px solid #313244",
+              borderRadius: 6,
+              padding: 6,
+              marginBottom: 6,
+              background: sel ? "rgba(137,180,250,0.08)" : "transparent",
+            }}
+          >
+            <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+              <input
+                type="checkbox"
+                checked={l.visible}
+                onChange={(e) => setLayerVisible(id, e.target.checked)}
+                title="visible"
+              />
+              <button
+                onClick={() => selectLayer(id)}
+                style={{
+                  ...iconBtn,
+                  flex: 1,
+                  textAlign: "left",
+                  background: "transparent",
+                  fontWeight: sel ? 600 : 400,
+                }}
+              >
+                {l.name}
+              </button>
+              <button style={iconBtn} title="move up" onClick={() => moveLayer(id, "up")}>
+                ↑
+              </button>
+              <button
+                style={iconBtn}
+                title="move down"
+                onClick={() => moveLayer(id, "down")}
+              >
+                ↓
+              </button>
+              <button style={iconBtn} title="remove" onClick={() => removeLayer(id)}>
+                ✕
+              </button>
+            </div>
+            <div style={{ display: "flex", alignItems: "center", gap: 6, marginTop: 4 }}>
+              <input
+                type="range"
+                min={0}
+                max={1}
+                step={0.01}
+                value={l.opacity}
+                onChange={(e) => setLayerOpacity(id, parseFloat(e.target.value))}
+                style={{ flex: 1 }}
+                title="layer opacity"
+              />
+              <select
+                value={l.blend}
+                onChange={(e) => setLayerBlend(id, e.target.value as BlendMode)}
+                title="blend mode"
+                style={{ fontSize: 11 }}
+              >
+                {BLEND_MODES.map((b) => (
+                  <option key={b} value={b}>
+                    {b}
+                  </option>
+                ))}
+              </select>
+            </div>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+// Default terrain extent (Engineering metres) when no scene footprint is available yet —
+// the doc 01 §2 default ROI (±5 km). When a scene AABB exists we use its XY footprint so
+// the surface spans the loaded data.
+const DEFAULT_TERRAIN_EXTENT = {
+  xmin: -5000,
+  xmax: 5000,
+  ymin: -5000,
+  ymax: 5000,
+};
 
 export function ControlPanel() {
-  const meta = useViewer((s) => s.meta);
-  const tf = useViewer((s) => s.tf);
-  const setTF = useViewer((s) => s.setTF);
+  const layer = useViewer(selectedLayer);
   const steps = useViewer((s) => s.steps);
   const setSteps = useViewer((s) => s.setSteps);
+  const vex = useViewer((s) => s.verticalExaggeration);
+  const setVex = useViewer((s) => s.setVerticalExaggeration);
+  const addTerrainLayer = useViewer((s) => s.addTerrainLayer);
+  const layers = useViewer((s) => s.layers);
+  const layerOrder = useViewer((s) => s.layerOrder);
+  const sceneAABB = useViewer((s) => s.sceneAABB);
+
+  // The surfaceModel spec from the selected (or any) layer's frame meta, when present
+  // (doc 01 §2). Falls back to flat:0 (local mode default).
+  const hasTerrain = layerOrder.some((id) => layers[id]?.kind === "terrain");
+  const onAddTerrain = () => {
+    const frame =
+      (layer?.meta?.frame as Record<string, unknown> | undefined) ?? undefined;
+    const surfaceModelSpec =
+      (frame?.surfaceModel as string | null | undefined) ?? "flat:0";
+    const extent = sceneAABB
+      ? {
+          xmin: sceneAABB.min[0],
+          xmax: sceneAABB.max[0],
+          ymin: sceneAABB.min[1],
+          ymax: sceneAABB.max[1],
+        }
+      : DEFAULT_TERRAIN_EXTENT;
+    addTerrainLayer({ surfaceModelSpec, extent });
+  };
   const clip = useViewer((s) => s.clip);
   const setClip = useViewer((s) => s.setClip);
   const sliceEnabled = useViewer((s) => s.sliceEnabled);
@@ -39,201 +203,164 @@ export function ControlPanel() {
   const setSlicePos = useViewer((s) => s.setSlicePos);
   const sliceOpacity = useViewer((s) => s.sliceOpacity);
   const setSliceOpacity = useViewer((s) => s.setSliceOpacity);
-  const volumeVisible = useViewer((s) => s.volumeVisible);
-  const setVolumeVisible = useViewer((s) => s.setVolumeVisible);
 
-  // Domain slider span (a little beyond stats for headroom).
-  const lo = meta?.stats.min ?? tf.domainMin - 1;
-  const hi = meta?.stats.max ?? tf.domainMax + 1;
-  const step = Math.max((hi - lo) / 200, 1e-6);
+  const [showDiscovery, setShowDiscovery] = useState(false);
 
   return (
     <div style={panel}>
-      <div style={{ fontWeight: 600, marginBottom: 10 }}>
-        Transfer function
-        {meta && (
-          <span style={{ opacity: 0.6, fontWeight: 400 }}>
-            {" "}— {meta.property} ({meta.canonicalUnit})
-          </span>
-        )}
-      </div>
-
-      <div style={row}>
-        <span style={label}>Colormap</span>
-        <select
-          value={tf.colormap}
-          onChange={(e) => setTF({ colormap: e.target.value })}
-          style={{ flex: 1 }}
-        >
-          {COLORMAP_NAMES.map((c) => (
-            <option key={c} value={c}>
-              {c}
-            </option>
-          ))}
-        </select>
-      </div>
-
-      <div style={row}>
-        <span style={label}>Domain min</span>
-        <input
-          type="range"
-          min={lo}
-          max={hi}
-          step={step}
-          value={tf.domainMin}
-          onChange={(e) => setTF({ domainMin: parseFloat(e.target.value) })}
-          style={{ flex: 1 }}
-        />
-        <span style={{ width: 48, textAlign: "right" }}>{tf.domainMin.toFixed(2)}</span>
-      </div>
-
-      <div style={row}>
-        <span style={label}>Domain max</span>
-        <input
-          type="range"
-          min={lo}
-          max={hi}
-          step={step}
-          value={tf.domainMax}
-          onChange={(e) => setTF({ domainMax: parseFloat(e.target.value) })}
-          style={{ flex: 1 }}
-        />
-        <span style={{ width: 48, textAlign: "right" }}>{tf.domainMax.toFixed(2)}</span>
-      </div>
-
-      <div style={row}>
-        <span style={label}>Log scale</span>
-        <input
-          type="checkbox"
-          checked={tf.scaling === "log"}
-          onChange={(e) => setTF({ scaling: e.target.checked ? "log" : "linear" })}
-        />
-        <span style={{ ...label, marginLeft: 16 }}>Invert</span>
-        <input
-          type="checkbox"
-          checked={tf.invert}
-          onChange={(e) => setTF({ invert: e.target.checked })}
-        />
-      </div>
-
-      <div style={row}>
-        <span style={label}>Opacity</span>
-        <input
-          type="range"
-          min={0}
-          max={1}
-          step={0.01}
-          value={tf.opacity}
-          onChange={(e) => setTF({ opacity: parseFloat(e.target.value) })}
-          style={{ flex: 1 }}
-        />
-        <span style={{ width: 48, textAlign: "right" }}>{tf.opacity.toFixed(2)}</span>
-      </div>
-
-      <div style={row}>
-        <span style={label}>Steps</span>
-        <input
-          type="range"
-          min={64}
-          max={512}
-          step={8}
-          value={steps}
-          onChange={(e) => setSteps(parseInt(e.target.value, 10))}
-          style={{ flex: 1 }}
-        />
-        <span style={{ width: 48, textAlign: "right" }}>{steps}</span>
-      </div>
-
-      <div style={row}>
-        <span style={label}>Volume</span>
-        <input
-          type="checkbox"
-          checked={volumeVisible}
-          onChange={(e) => setVolumeVisible(e.target.checked)}
-        />
-      </div>
-
-      <hr style={{ border: "none", borderTop: "1px solid #313244", margin: "10px 0" }} />
-      <div style={{ fontWeight: 600, marginBottom: 10 }}>Orthogonal slice</div>
-
-      <div style={row}>
-        <span style={label}>Enabled</span>
-        <input
-          type="checkbox"
-          checked={sliceEnabled}
-          onChange={(e) => setSliceEnabled(e.target.checked)}
-        />
-        <span style={{ ...label, marginLeft: 12 }}>Axis</span>
-        {(["x", "y", "z"] as const).map((a) => (
-          <button
-            key={a}
-            onClick={() => setSliceAxis(a)}
-            style={{
-              background: sliceAxis === a ? "#89b4fa" : "#313244",
-              color: sliceAxis === a ? "#11161f" : "#cdd6f4",
-              border: "none",
-              borderRadius: 4,
-              padding: "2px 8px",
-              cursor: "pointer",
-            }}
+      {showDiscovery ? (
+        <DiscoveryPanel onClose={() => setShowDiscovery(false)} />
+      ) : (
+        <>
+          <div
+            style={{ display: "flex", justifyContent: "space-between", marginBottom: 10 }}
           >
-            {a.toUpperCase()}
-          </button>
-        ))}
-      </div>
+            <span style={{ fontWeight: 600 }}>Layers</span>
+            <span style={{ display: "flex", gap: 6 }}>
+              <button
+                style={iconBtn}
+                title="add a ground-surface terrain layer (doc 06 §6)"
+                disabled={hasTerrain}
+                onClick={onAddTerrain}
+              >
+                + terrain
+              </button>
+              <button style={iconBtn} onClick={() => setShowDiscovery(true)}>
+                + open project
+              </button>
+            </span>
+          </div>
 
-      <div style={row}>
-        <span style={label}>Position</span>
-        <input
-          type="range"
-          min={0}
-          max={1}
-          step={0.005}
-          value={slicePos}
-          onChange={(e) => setSlicePos(parseFloat(e.target.value))}
-          style={{ flex: 1 }}
-        />
-        <span style={{ width: 48, textAlign: "right" }}>{slicePos.toFixed(2)}</span>
-      </div>
+          <LayerManager />
 
-      <div style={row}>
-        <span style={label}>Slice α</span>
-        <input
-          type="range"
-          min={0}
-          max={1}
-          step={0.01}
-          value={sliceOpacity}
-          onChange={(e) => setSliceOpacity(parseFloat(e.target.value))}
-          style={{ flex: 1 }}
-        />
-        <span style={{ width: 48, textAlign: "right" }}>{sliceOpacity.toFixed(2)}</span>
-      </div>
+          {layer && layer.kind === "volume" && (
+            <>
+              <hr style={hr} />
+              <TransferFnEditor layer={layer} />
+            </>
+          )}
 
-      <hr style={{ border: "none", borderTop: "1px solid #313244", margin: "10px 0" }} />
-      <div style={row}>
-        <span style={label}>Clip box</span>
-        <button
-          onClick={() => setClip({ min: [0, 0, 0], max: [1, 1, 1] })}
-          style={{
-            background: "#313244",
-            color: "#cdd6f4",
-            border: "none",
-            borderRadius: 4,
-            padding: "3px 10px",
-            cursor: "pointer",
-          }}
-        >
-          Reset
-        </button>
-        <span style={{ fontSize: 11, opacity: 0.6, marginLeft: 8 }}>
-            drag the colored handles
-        </span>
-      </div>
-      <div style={{ fontSize: 11, opacity: 0.6 }}>
-        clip [{clip.min.map((v) => v.toFixed(2)).join(", ")}] –
-        [{clip.max.map((v) => v.toFixed(2)).join(", ")}]
-      </div>
+          <hr style={hr} />
+          <div style={row}>
+            <span style={label}>Steps</span>
+            <input
+              type="range"
+              min={64}
+              max={512}
+              step={8}
+              value={steps}
+              onChange={(e) => setSteps(parseInt(e.target.value, 10))}
+              style={{ flex: 1 }}
+            />
+            <span style={{ width: 48, textAlign: "right" }}>{steps}</span>
+          </div>
+
+          <div style={row}>
+            <span style={label}>Vert. exag</span>
+            <input
+              type="range"
+              min={1}
+              max={10}
+              step={0.5}
+              value={vex}
+              onChange={(e) => setVex(parseFloat(e.target.value))}
+              style={{ flex: 1 }}
+              title="vertical exaggeration (render-only, doc 06 §2.3)"
+            />
+            <span style={{ width: 48, textAlign: "right" }}>{vex.toFixed(1)}×</span>
+          </div>
+
+          <hr style={hr} />
+          <div style={{ fontWeight: 600, marginBottom: 10 }}>
+            Orthogonal slice
+            <span style={{ opacity: 0.6, fontWeight: 400 }}>
+              {" "}
+              — {layer ? layer.name : "no layer"}
+            </span>
+          </div>
+
+          <div style={row}>
+            <span style={label}>Enabled</span>
+            <input
+              type="checkbox"
+              checked={sliceEnabled}
+              onChange={(e) => setSliceEnabled(e.target.checked)}
+            />
+            <span style={{ ...label, marginLeft: 12, width: 36 }}>Axis</span>
+            {(["x", "y", "z"] as const).map((a) => (
+              <button
+                key={a}
+                onClick={() => setSliceAxis(a)}
+                style={{
+                  background: sliceAxis === a ? "#89b4fa" : "#313244",
+                  color: sliceAxis === a ? "#11161f" : "#cdd6f4",
+                  border: "none",
+                  borderRadius: 4,
+                  padding: "2px 8px",
+                  cursor: "pointer",
+                }}
+              >
+                {a.toUpperCase()}
+              </button>
+            ))}
+          </div>
+
+          <div style={row}>
+            <span style={label}>Position</span>
+            <input
+              type="range"
+              min={0}
+              max={1}
+              step={0.005}
+              value={slicePos}
+              onChange={(e) => setSlicePos(parseFloat(e.target.value))}
+              style={{ flex: 1 }}
+            />
+            <span style={{ width: 48, textAlign: "right" }}>{slicePos.toFixed(2)}</span>
+          </div>
+
+          <div style={row}>
+            <span style={label}>Slice α</span>
+            <input
+              type="range"
+              min={0}
+              max={1}
+              step={0.01}
+              value={sliceOpacity}
+              onChange={(e) => setSliceOpacity(parseFloat(e.target.value))}
+              style={{ flex: 1 }}
+            />
+            <span style={{ width: 48, textAlign: "right" }}>
+              {sliceOpacity.toFixed(2)}
+            </span>
+          </div>
+
+          <hr style={hr} />
+          <div style={row}>
+            <span style={label}>Clip box</span>
+            <button
+              onClick={() => setClip({ min: [0, 0, 0], max: [1, 1, 1] })}
+              style={{
+                background: "#313244",
+                color: "#cdd6f4",
+                border: "none",
+                borderRadius: 4,
+                padding: "3px 10px",
+                cursor: "pointer",
+              }}
+            >
+              Reset
+            </button>
+            <span style={{ fontSize: 11, opacity: 0.6, marginLeft: 8 }}>
+              drag the colored handles
+            </span>
+          </div>
+          <div style={{ fontSize: 11, opacity: 0.6 }}>
+            clip [{clip.min.map((v) => v.toFixed(2)).join(", ")}] – [
+            {clip.max.map((v) => v.toFixed(2)).join(", ")}]
+          </div>
+        </>
+      )}
     </div>
   );
 }

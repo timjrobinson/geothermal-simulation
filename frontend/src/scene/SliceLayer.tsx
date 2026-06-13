@@ -6,7 +6,7 @@
 import { useMemo, useRef } from "react";
 import { useFrame } from "@react-three/fiber";
 import * as THREE from "three";
-import { useViewer } from "../store";
+import { useViewer, selectedLayer } from "../store";
 import { makeData3DTexture } from "../lib/data3d";
 import { makeTransferFnTexture, updateTransferFnTexture } from "../lib/transferFn";
 import { SLICE_VERT, SLICE_FRAG } from "../lib/shaders";
@@ -60,9 +60,11 @@ function buildSliceGeometry(
 }
 
 export function SliceLayer() {
-  const volume = useViewer((s) => s.volume);
-  const aabb = useViewer((s) => s.aabb);
-  const tf = useViewer((s) => s.tf);
+  // The slice samples the SELECTED layer's volume + transfer function (doc 06 §4.1).
+  const layer = useViewer(selectedLayer);
+  const volume = layer?.volume ?? null;
+  const aabb = layer?.aabb ?? null;
+  const tf = layer?.transferFn ?? null;
   const clip = useViewer((s) => s.clip);
   const enabled = useViewer((s) => s.sliceEnabled);
   const axis = useViewer((s) => s.sliceAxis);
@@ -71,11 +73,17 @@ export function SliceLayer() {
 
   const matRef = useRef<THREE.ShaderMaterial | null>(null);
 
+  // Rebuild the slice's 3D texture when the selected layer's volume changes.
   const volumeTex = useMemo(
     () => (volume ? makeData3DTexture(volume) : null),
     [volume],
   );
-  const tfTex = useMemo(() => makeTransferFnTexture(tf), []); // eslint-disable-line react-hooks/exhaustive-deps
+  // LUT texture: created lazily once a layer is selected, re-baked in place on TF edits.
+  // Keyed off the volume so it is re-created when the selected layer changes.
+  const tfTex = useMemo(
+    () => (tf ? makeTransferFnTexture(tf) : null),
+    [volume], // eslint-disable-line react-hooks/exhaustive-deps
+  );
 
   const geometry = useMemo(() => {
     if (!aabb) return null;
@@ -83,7 +91,7 @@ export function SliceLayer() {
   }, [aabb, axis, pos]);
 
   const material = useMemo(() => {
-    if (!volumeTex) return null;
+    if (!volumeTex || !tfTex || !tf) return null;
     const mat = new THREE.ShaderMaterial({
       glslVersion: THREE.GLSL3,
       vertexShader: SLICE_VERT,
@@ -106,12 +114,12 @@ export function SliceLayer() {
   }, [volumeTex, tfTex]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useMemo(() => {
-    if (tfTex) updateTransferFnTexture(tfTex, tf);
+    if (tfTex && tf) updateTransferFnTexture(tfTex, tf);
   }, [tf, tfTex]);
 
   useFrame(() => {
     const mat = matRef.current;
-    if (!mat) return;
+    if (!mat || !tf) return;
     const u = mat.uniforms;
     u.uDomainMin.value = tf.domainMin;
     u.uDomainMax.value = tf.domainMax;
