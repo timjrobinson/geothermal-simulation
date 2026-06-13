@@ -17,6 +17,7 @@ import { makeMockVolume } from "./lib/mockVolume";
 import { Scene } from "./scene/Scene";
 import { ControlPanel } from "./ui/ControlPanel";
 import { AnalysisPanel } from "./ui/AnalysisPanel";
+import { FavorabilityPanel } from "./ui/FavorabilityPanel";
 
 export function App() {
   const loadData = useViewer((s) => s.loadData);
@@ -37,6 +38,7 @@ export function App() {
   const setAnalysisOpen = useViewer((s) => s.setAnalysisOpen);
 
   const [mode, setMode] = useState<string>("");
+  const [favorabilityOpen, setFavorabilityOpen] = useState(false);
 
   // Load the volume (mock or backend) once on mount per URL params.
   useEffect(() => {
@@ -125,6 +127,32 @@ export function App() {
           title="open the cross-plot / brushing analysis panel (doc 06 §10.3)"
         >
           Analysis ▸
+        </button>
+      )}
+
+      {favorabilityOpen ? (
+        <FavorabilityPanel onClose={() => setFavorabilityOpen(false)} />
+      ) : (
+        <button
+          onClick={() => setFavorabilityOpen(true)}
+          style={{
+            position: "absolute",
+            bottom: 12,
+            right: 120,
+            zIndex: 11,
+            background: "#fab387",
+            color: "#11131c",
+            border: "1px solid #fab387",
+            borderRadius: 6,
+            padding: "6px 12px",
+            cursor: "pointer",
+            fontSize: 13,
+            fontWeight: 600,
+            fontFamily: "ui-sans-serif, system-ui, sans-serif",
+          }}
+          title="open the favorability + weight-tuning panel (doc 07 §4.6)"
+        >
+          Favorability ▸
         </button>
       )}
 

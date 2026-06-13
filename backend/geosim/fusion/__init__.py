@@ -32,6 +32,24 @@ from .analysis import (
     sample_path,
     selection_to_mask,
 )
+from .calibration import (
+    CalibrationFit,
+    CalibrationResult,
+    Probe,
+    calibrate_transform,
+    fit_transform_params,
+    probes_from_deviation_survey,
+    promote_spatial,
+    score_against_truth,
+)
+from .favorability import (
+    Evidence,
+    FavorabilityResult,
+    FavorabilitySpec,
+    TransferFn,
+    compute_favorability,
+    membership,
+)
 from .grid import (
     DEFAULT_CELL_CAP,
     FusedGrid,
@@ -41,6 +59,17 @@ from .grid import (
     open_fused_group,
 )
 from .resample import ResampledLayerRef, resample_to_fused, resolve_method
+from .transform import (
+    CALIBRATION_STATUSES,
+    TIER_ORDER,
+    InputSpec,
+    OutputSpec,
+    Param,
+    Transform,
+    TransformContext,
+    TransformResult,
+    run_transform,
+)
 
 __all__ = [
     # grid (doc 07 §1)
@@ -66,4 +95,30 @@ __all__ = [
     "correlation_matrix",
     "cluster_fused",
     "selection_to_mask",
+    # transform engine (doc 07 §4)
+    "Transform",
+    "InputSpec",
+    "OutputSpec",
+    "Param",
+    "TransformContext",
+    "TransformResult",
+    "run_transform",
+    "CALIBRATION_STATUSES",
+    "TIER_ORDER",
+    # favorability (doc 07 §4.6)
+    "TransferFn",
+    "Evidence",
+    "FavorabilitySpec",
+    "FavorabilityResult",
+    "membership",
+    "compute_favorability",
+    # calibration workflow (doc 07 §4.8)
+    "Probe",
+    "CalibrationFit",
+    "CalibrationResult",
+    "probes_from_deviation_survey",
+    "fit_transform_params",
+    "promote_spatial",
+    "score_against_truth",
+    "calibrate_transform",
 ]

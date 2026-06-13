@@ -68,12 +68,33 @@ export interface Layer {
   volume?: DecodedVolume;
   aabb?: AABB;
 
+  // Confidence-modulated opacity — the doc 07 §5.3 "honest view" (doc 06 §9.2 opacity
+  // modulation). Optional: binds a co-registered confidence/σ volume (same grid as this
+  // layer's data) that scales each sample's opacity so low-confidence regions render faint.
+  // `invert` handles a σ (uncertainty) volume where HIGH value = LESS confident.
+  confidence?: ConfidenceModulation;
+
   // Resident data for `terrain` layers (doc 06 §6, doc 01 §6). The surface grid is the
   // ground surface in the Engineering Frame; subsurface volumes hang beneath it. `basemap`
   // opts into draped online XYZ tiles (doc 06 §6.2) — default shaded-relief otherwise.
   surface?: SurfaceGrid;
   surfaceModel?: SurfaceModel;
   basemap?: boolean;
+}
+
+// Confidence-modulated-opacity binding (doc 07 §5.3 honest view; doc 06 §9.2). `volume` is a
+// co-registered confidence/σ field (same grid as the layer's data); the shader maps its raw
+// value over [min,max] → an opacity weight in [floor,1]. `invert` flips it for a σ volume
+// (high value = low confidence). `floor` keeps faint regions barely visible rather than
+// fully hidden. When `enabled` is false the layer renders unmodulated.
+export interface ConfidenceModulation {
+  enabled: boolean;
+  volume: DecodedVolume; // raw confidence/σ field, co-registered with the layer's data
+  min: number; // raw value mapped to weight 0
+  max: number; // raw value mapped to weight 1
+  invert: boolean; // σ-style: high value = low confidence
+  floor: number; // minimum opacity weight (0..1)
+  sourceId?: string; // the confidence PropertyModel id (provenance / UI label)
 }
 
 const DEFAULT_TF: TransferFnSpec = {

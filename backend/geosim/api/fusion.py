@@ -41,16 +41,24 @@ from geosim.catalog import (
 )
 from geosim.fusion import (
     SYNC_CELL_LIMIT,
+    FavorabilitySpec,
+    Probe,
     build_fused_model,
+    calibrate_transform,
     cluster_fused,
+    compute_favorability,
     correlation_matrix,
     crossplot,
     fused_grid_from_row,
     histogram,
+    probes_from_deviation_survey,
     resample_to_fused,
+    run_transform,
     sample_fused,
 )
+from geosim.fusion.transform import Transform
 from geosim.jobs import JobRunner, ProgressReporter
+from geosim.plugins import get_registry
 from geosim.storage import ProjectLayout
 
 __all__ = ["build_fusion_router"]
@@ -158,6 +166,71 @@ class ClusterRequest(BaseModel):
     bbox: dict[str, float] | None = None
     write_volumes: bool = True
     force_job: bool = False  # force the job-based path regardless of working-set size
+
+
+class TransformRunRequest(BaseModel):
+    """``POST /fused/{gridId}/transform`` body (doc 07 §6, §4.5)."""
+
+    project_id: str
+    transform_id: str
+    version: str | None = None  # optional pin; None ⇒ the registered version (doc 07 §4.4)
+    inputs: dict[str, str] | None = None  # property → native PropertyModel id to resample in
+    params: dict[str, Any] | None = None
+    uncertainty: str = "delta"  # "delta" (default) | "monte_carlo" (job-based, doc 07 §5.5)
+    mc_samples: int = 64
+    mc_seed: int = 0
+    force_job: bool = False
+
+
+class FavorabilityRequest(BaseModel):
+    """``POST /fused/{gridId}/favorability`` body (doc 07 §4.6 ``FavorabilitySpec``).
+
+    ``method`` defaults to fuzzy-conjunction (the non-compensatory default, critique #11);
+    ``weighted`` is the exploratory mode; ``bayesian`` is deferred (→ 400). Each ``evidence``
+    item is ``{source, target, transferFn, weight, role}`` (doc 07 §4.6 sketch).
+    """
+
+    project_id: str
+    method: str = "fuzzy"  # "fuzzy" (default) | "weighted" (exploratory) | "bayesian" (deferred)
+    fuzzy_and: str = "min"  # "min" | "product"
+    missing_policy: str = "nodata"  # "nodata" | "neutral" | "drop"
+    evidence: list[dict[str, Any]]
+    force_job: bool = False
+
+
+class CalibrateRequest(BaseModel):
+    """``POST /fused/{gridId}/calibrate`` body (doc 07 §4.8).
+
+    Calibrate a transform against ground-truth probes sampled ALONG a well path: fit
+    ``fit_params`` to the (measured ↔ predicted) pairs → a parameter distribution, re-run the
+    transform with the calibrated params over the grid, and promote the output to
+    ``well_calibrated`` / ``quantitative`` WHERE the wells constrain it (within
+    ``resolving_distance``), leaving distant cells ``proxy`` / "likelihood" (doc 07 §4.8 ④).
+
+    Probes can be supplied directly as ``probes`` (Engineering-XYZ + measured value) or as a
+    deviation survey (``deviation_survey`` ``(MD,inc°,azi°)`` rows + ``wellhead`` + a measured
+    log ``measured_md``/``measured_values``), which is integrated to Engineering XYZ
+    (minimum-curvature, doc 09 §4.3) and positioned along the path (doc 07 §3.1).
+    """
+
+    project_id: str
+    transform_id: str
+    version: str | None = None
+    fit_params: list[str]
+    resolving_distance: float
+    inputs: dict[str, str] | None = None  # property → native PropertyModel id to resample in
+    params: dict[str, Any] | None = None  # base params held fixed (non-fit)
+    # Either supply probes directly …
+    probes: list[dict[str, Any]] | None = None  # [{z,y,x,measured,unit,md?,sigma?}]
+    # … or a deviation survey + measured log (the harness builds the probes).
+    deviation_survey: list[list[float]] | None = None  # [[MD,inc°,azi°], …]
+    wellhead: list[float] | None = None  # [x, y] or [x, y, elev]
+    kb_elev: float | None = None
+    measured_md: list[float] | None = None
+    measured_values: list[float] | None = None
+    measured_unit: str | None = None
+    measured_sigma: list[float] | None = None
+    force_job: bool = False
 
 
 class ArtifactSummary(BaseModel):
@@ -355,6 +428,232 @@ def build_fusion_router(session_dep: Any) -> APIRouter:
         )
         return {"mode": "job", "job_id": job_id}
 
+    # ──────────────────────────────── GET /transforms (doc 07 §6, §4.7) ────────────────────────
+    @router.get("/transforms")
+    def list_transforms() -> dict[str, Any]:
+        """The transform registry palette (doc 07 §6 ``GET /transforms``, doc 08-backed).
+
+        Returns every registered doc-07 :class:`~geosim.fusion.transform.Transform` with its
+        full declarative spec (id/version/title/target, typed inputs/output, params, stated
+        assumptions + calibration status) so the UI can build the transform palette + param
+        controls (doc 07 §4.1/§4.7).
+        """
+        out = []
+        for t in get_registry().transforms():
+            if isinstance(t, Transform) and hasattr(t, "describe"):
+                out.append(t.describe())
+        return {"transforms": out}
+
+    # ──────────────────── POST /fused/{gridId}/transform (doc 07 §6, §4.5) ────────────────────
+    @router.post("/fused/{grid_id}/transform")
+    def transform_route(
+        grid_id: str, body: TransformRunRequest, request: Request, session: Session = session_dep
+    ):
+        fem = _fem_or_404(session, grid_id)
+        if session.get(Project, body.project_id) is None:
+            raise HTTPException(status_code=404, detail="project not found")
+        transform = _resolve_transform(body.transform_id, body.version)
+        if transform is None:
+            raise HTTPException(
+                status_code=404, detail=f"transform {body.transform_id!r} not registered"
+            )
+        storage_root = request.app.state.storage_root
+        layout = ProjectLayout(storage_root, body.project_id)
+        grid = fused_grid_from_row(fem)
+
+        # Monte-Carlo / forced / whole-grid runs are job-based (doc 07 §4.5, §5.5, §6).
+        job_based = (
+            body.force_job
+            or body.uncertainty == "monte_carlo"
+            or grid.n_cells > SYNC_CELL_LIMIT
+        )
+        if not job_based:
+            try:
+                result = run_transform(
+                    session, layout, fem, transform,
+                    inputs=body.inputs, params=body.params,
+                    uncertainty=body.uncertainty,
+                    mc_samples=body.mc_samples, mc_seed=body.mc_seed,
+                    storage_root=storage_root,
+                )
+            except ValueError as e:
+                raise HTTPException(status_code=400, detail=str(e)) from e
+            return {"mode": "sync", **result.to_payload()}
+
+        runner: JobRunner = request.app.state.job_runner
+        session_factory = request.app.state.session_factory
+
+        def _job(params: dict[str, Any], reporter: ProgressReporter) -> dict[str, Any]:
+            job_session = session_factory()
+            try:
+                job_fem = job_session.get(FusedModel, grid_id)
+                result = run_transform(
+                    job_session, layout, job_fem, transform,
+                    inputs=params.get("inputs"), params=params.get("params"),
+                    uncertainty=params["uncertainty"],
+                    mc_samples=params["mc_samples"], mc_seed=params["mc_seed"],
+                    storage_root=storage_root, progress=reporter,
+                )
+                return result.to_payload()
+            finally:
+                job_session.close()
+
+        job_id = runner.enqueue(
+            f"transform:{transform.id}",
+            {
+                "inputs": body.inputs, "params": body.params,
+                "uncertainty": body.uncertainty,
+                "mc_samples": body.mc_samples, "mc_seed": body.mc_seed,
+            },
+            _job,
+            project_id=body.project_id,
+        )
+        return {"mode": "job", "job_id": job_id}
+
+    # ──────────────── POST /fused/{gridId}/favorability (doc 07 §4.6) ────────────────
+    @router.post("/fused/{grid_id}/favorability")
+    def favorability_route(
+        grid_id: str, body: FavorabilityRequest, request: Request, session: Session = session_dep
+    ):
+        """Compute the headline geothermal favorability volume + honesty diagnostics (doc 07 §4.6).
+
+        Default = fuzzy-conjunction (heat AND fluid AND permeability, non-compensatory);
+        ``weighted`` is the exploratory compensatory mode with the missing-required guard;
+        ``bayesian`` is deferred. Writes a ``[0,1]`` favorability PropertyModel plus its
+        confidence, evidence-overlap, and assumption-burden companion volumes.
+        """
+        fem = _fem_or_404(session, grid_id)
+        if session.get(Project, body.project_id) is None:
+            raise HTTPException(status_code=404, detail="project not found")
+        storage_root = request.app.state.storage_root
+        layout = ProjectLayout(storage_root, body.project_id)
+        grid = fused_grid_from_row(fem)
+
+        try:
+            spec = FavorabilitySpec.from_payload({
+                "method": body.method, "fuzzyAnd": body.fuzzy_and,
+                "missingPolicy": body.missing_policy, "evidence": body.evidence,
+            })
+        except (ValueError, KeyError) as e:
+            raise HTTPException(status_code=400, detail=str(e)) from e
+
+        job_based = body.force_job or grid.n_cells > SYNC_CELL_LIMIT
+        if not job_based:
+            try:
+                result = compute_favorability(
+                    session, layout, fem, spec, storage_root=storage_root
+                )
+            except NotImplementedError as e:
+                raise HTTPException(status_code=400, detail=str(e)) from e
+            except ValueError as e:
+                raise HTTPException(status_code=400, detail=str(e)) from e
+            return {"mode": "sync", **result.to_payload()}
+
+        runner: JobRunner = request.app.state.job_runner
+        session_factory = request.app.state.session_factory
+
+        def _job(params: dict[str, Any], reporter: ProgressReporter) -> dict[str, Any]:
+            job_session = session_factory()
+            try:
+                job_fem = job_session.get(FusedModel, grid_id)
+                job_spec = FavorabilitySpec.from_payload(params["spec"])
+                result = compute_favorability(
+                    job_session, layout, job_fem, job_spec,
+                    storage_root=storage_root, progress=reporter,
+                )
+                return result.to_payload()
+            finally:
+                job_session.close()
+
+        job_id = runner.enqueue(
+            "fuse:favorability",
+            {"spec": {
+                "method": body.method, "fuzzyAnd": body.fuzzy_and,
+                "missingPolicy": body.missing_policy, "evidence": body.evidence,
+            }},
+            _job,
+            project_id=body.project_id,
+        )
+        return {"mode": "job", "job_id": job_id}
+
+    # ──────────────── POST /fused/{gridId}/calibrate (doc 07 §4.8) ────────────────
+    @router.post("/fused/{grid_id}/calibrate")
+    def calibrate_route(
+        grid_id: str, body: CalibrateRequest, request: Request, session: Session = session_dep
+    ):
+        """Calibrate a transform to well/core/geochem probes → a promoted derived volume (§4.8).
+
+        Fits ``fit_params`` to the (measured ↔ predicted) pairs at probe locations (a param
+        distribution, not a point fit), re-runs the transform with the calibrated params, and
+        promotes the output to ``well_calibrated`` / ``quantitative`` within
+        ``resolving_distance`` of the probes — distant cells stay ``proxy`` / "likelihood"
+        (spatially honest, doc 07 §4.8). Sync for small grids; job-based for big/forced runs.
+        """
+        fem = _fem_or_404(session, grid_id)
+        if session.get(Project, body.project_id) is None:
+            raise HTTPException(status_code=404, detail="project not found")
+        transform = _resolve_transform(body.transform_id, body.version)
+        if transform is None:
+            raise HTTPException(
+                status_code=404, detail=f"transform {body.transform_id!r} not registered"
+            )
+        storage_root = request.app.state.storage_root
+        layout = ProjectLayout(storage_root, body.project_id)
+        grid = fused_grid_from_row(fem)
+
+        try:
+            probes = _build_probes(body)
+        except (ValueError, KeyError) as e:
+            raise HTTPException(status_code=400, detail=str(e)) from e
+
+        job_based = body.force_job or grid.n_cells > SYNC_CELL_LIMIT
+        if not job_based:
+            try:
+                result = calibrate_transform(
+                    session, layout, fem, transform, probes, body.fit_params,
+                    resolving_distance=body.resolving_distance,
+                    inputs=body.inputs, params=body.params,
+                    storage_root=storage_root,
+                )
+            except ValueError as e:
+                raise HTTPException(status_code=400, detail=str(e)) from e
+            return {"mode": "sync", **result.to_payload()}
+
+        runner: JobRunner = request.app.state.job_runner
+        session_factory = request.app.state.session_factory
+        probe_payload = [
+            {"z": p.z, "y": p.y, "x": p.x, "measured": p.measured, "unit": p.unit,
+             "md": p.md, "sigma": p.sigma}
+            for p in probes
+        ]
+
+        def _job(params: dict[str, Any], reporter: ProgressReporter) -> dict[str, Any]:
+            job_session = session_factory()
+            try:
+                job_fem = job_session.get(FusedModel, grid_id)
+                job_probes = [Probe(**p) for p in params["probes"]]
+                result = calibrate_transform(
+                    job_session, layout, job_fem, transform, job_probes, params["fit_params"],
+                    resolving_distance=params["resolving_distance"],
+                    inputs=params.get("inputs"), params=params.get("params"),
+                    storage_root=storage_root, progress=reporter,
+                )
+                return result.to_payload()
+            finally:
+                job_session.close()
+
+        job_id = runner.enqueue(
+            f"calibrate:{transform.id}",
+            {
+                "probes": probe_payload, "fit_params": body.fit_params,
+                "resolving_distance": body.resolving_distance,
+                "inputs": body.inputs, "params": body.params,
+            },
+            _job,
+            project_id=body.project_id,
+        )
+        return {"mode": "job", "job_id": job_id}
+
     # ──────────────────────── GET /projects/{pid}/artifacts ───────────────────────
     @router.get("/projects/{pid}/artifacts", response_model=list[ArtifactSummary])
     def list_artifacts(
@@ -389,6 +688,54 @@ def build_fusion_router(session_dep: Any) -> APIRouter:
         return out
 
     return router
+
+
+def _build_probes(body: CalibrateRequest) -> list[Probe]:
+    """Build calibration probes from the request body (direct probes OR a deviation survey)."""
+    if body.probes:
+        return [
+            Probe(
+                z=float(p["z"]), y=float(p["y"]), x=float(p["x"]),
+                measured=float(p["measured"]), unit=str(p["unit"]),
+                md=(float(p["md"]) if p.get("md") is not None else None),
+                sigma=(float(p["sigma"]) if p.get("sigma") is not None else None),
+            )
+            for p in body.probes
+        ]
+    if (
+        body.deviation_survey is not None
+        and body.wellhead is not None
+        and body.measured_md is not None
+        and body.measured_values is not None
+        and body.measured_unit is not None
+    ):
+        import numpy as np
+
+        return probes_from_deviation_survey(
+            np.asarray(body.deviation_survey, dtype=float),
+            np.asarray(body.wellhead, dtype=float),
+            np.asarray(body.measured_md, dtype=float),
+            np.asarray(body.measured_values, dtype=float),
+            unit=body.measured_unit, kb_elev=body.kb_elev,
+            measured_sigma=(
+                np.asarray(body.measured_sigma, dtype=float)
+                if body.measured_sigma is not None else None
+            ),
+        )
+    raise ValueError(
+        "supply either `probes` or a `deviation_survey` + `wellhead` + "
+        "`measured_md`/`measured_values`/`measured_unit`"
+    )
+
+
+def _resolve_transform(transform_id: str, version: str | None) -> Transform | None:
+    """Resolve a registered doc-07 transform by id (+ optional version pin, doc 07 §4.4)."""
+    for t in get_registry().transforms():
+        if isinstance(t, Transform) and t.id == transform_id:
+            if version is not None and t.version != version:
+                continue
+            return t
+    return None
 
 
 def _to_summary(session: Session, row: object) -> ArtifactSummary:

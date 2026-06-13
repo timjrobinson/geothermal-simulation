@@ -39,6 +39,26 @@ export function isStreamingLayer(layer: Layer): boolean {
   return shouldStream(spec);
 }
 
+// A 1×1×1 unit-confidence Data3DTexture (value 1.0) — the default `uConfidence` sampler for
+// layers with no confidence binding, so modulation is a no-op until one is bound (doc 07
+// §5.3). Created once and shared (it is immutable / read-only).
+let _unitConfTex: THREE.Data3DTexture | null = null;
+function unitConfidenceTexture(): THREE.Data3DTexture {
+  if (_unitConfTex) return _unitConfTex;
+  const tex = new THREE.Data3DTexture(new Float32Array([1]) as unknown as BufferSource, 1, 1, 1);
+  tex.format = THREE.RedFormat;
+  tex.type = THREE.FloatType;
+  tex.minFilter = THREE.NearestFilter;
+  tex.magFilter = THREE.NearestFilter;
+  tex.wrapS = THREE.ClampToEdgeWrapping;
+  tex.wrapT = THREE.ClampToEdgeWrapping;
+  tex.wrapR = THREE.ClampToEdgeWrapping;
+  tex.unpackAlignment = 1;
+  tex.needsUpdate = true;
+  _unitConfTex = tex;
+  return tex;
+}
+
 const BLEND_INDEX: Record<BlendMode, number> = {
   over: 0,
   additive: 1,
@@ -92,6 +112,15 @@ export function VolumeLayer({ layer, order }: { layer: Layer; order: number }) {
     [volume],
   );
 
+  // Confidence/σ texture for opacity modulation (doc 07 §5.3 honest view). Rebuilt only when
+  // the bound confidence volume changes; a 1×1×1 unit texture stands in when none is bound so
+  // the sampler3D uniform is always satisfied (an unbound layer renders unmodulated).
+  const conf = layer.confidence ?? null;
+  const confTex = useMemo(
+    () => (conf?.volume ? makeData3DTexture(conf.volume) : unitConfidenceTexture()),
+    [conf?.volume],
+  );
+
   // Transfer-function LUT texture — created once per layer, re-baked in place on edits.
   const tfTex = useMemo(() => makeTransferFnTexture(tf), []); // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -119,12 +148,19 @@ export function VolumeLayer({ layer, order }: { layer: Layer; order: number }) {
         uSteps: { value: steps },
         uRefStep: { value: 1.0 },
         uBlend: { value: BLEND_INDEX[layer.blend] },
+        // Confidence-modulated opacity (doc 07 §5.3). Seeded off here; pushed each frame.
+        uConfidence: { value: confTex },
+        uConfidenceOn: { value: 0 },
+        uConfMin: { value: 0 },
+        uConfMax: { value: 1 },
+        uConfInvert: { value: 0 },
+        uConfFloor: { value: 0.05 },
       },
     });
     applyGLBlend(mat, layer.blend);
     materialRef.current = mat;
     return mat;
-  }, [volumeTex, tfTex, aabb]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [volumeTex, tfTex, confTex, aabb]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Re-apply the GL blend equation when the layer's blend mode changes.
   useEffect(() => {
@@ -152,6 +188,17 @@ export function VolumeLayer({ layer, order }: { layer: Layer; order: number }) {
     u.uOpacityGain.value = tf.opacity * layer.opacity;
     u.uSteps.value = steps;
     u.uBlend.value = BLEND_INDEX[layer.blend];
+    // Confidence-modulated opacity (doc 07 §5.3): off unless a binding is enabled.
+    if (conf && conf.enabled) {
+      if (u.uConfidence.value !== confTex) u.uConfidence.value = confTex;
+      u.uConfidenceOn.value = 1;
+      u.uConfMin.value = conf.min;
+      u.uConfMax.value = conf.max;
+      u.uConfInvert.value = conf.invert ? 1 : 0;
+      u.uConfFloor.value = conf.floor;
+    } else {
+      u.uConfidenceOn.value = 0;
+    }
     const span = aabbSize(aabb);
     u.uRefStep.value = Math.max(Math.min(span[0], span[1], span[2]) / steps, 1e-3);
     // Clip box: scene-AABB fractions -> Engineering metres (or disabled => layer AABB).

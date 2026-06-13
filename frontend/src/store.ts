@@ -17,6 +17,7 @@ import type { TransferFnSpec } from "./lib/transferFn";
 import {
   type Layer,
   type BlendMode,
+  type ConfidenceModulation,
   type LayerCollection,
   addLayer as addLayerOp,
   removeLayer as removeLayerOp,
@@ -34,7 +35,7 @@ import { selectionToVolume, type VoxelReadout } from "./lib/brushing";
 
 // Re-export so existing importers (and tests) keep resolving these from the store.
 export { tfFromMeta };
-export type { Layer, BlendMode };
+export type { Layer, BlendMode, ConfidenceModulation };
 
 // Stable layer id for the cross-plot selection-mask overlay (doc 06 §10.3). One overlay is
 // re-used (replaced in place) as the brush changes so it never accumulates layers.
@@ -134,6 +135,9 @@ interface ViewerState extends LayerCollection {
   setLayerBlend: (id: string, blend: BlendMode) => void;
   setLayerClip: (id: string, clip: boolean) => void;
   setLayerTF: (id: string, patch: Partial<TransferFnSpec>) => void;
+  // Bind / update / clear a layer's confidence-modulated opacity (doc 07 §5.3 honest view).
+  // Pass null to remove the binding (layer renders unmodulated).
+  setLayerConfidence: (id: string, conf: ConfidenceModulation | null) => void;
 
   setSteps: (n: number) => void;
   setVerticalExaggeration: (v: number) => void;
@@ -322,6 +326,13 @@ export const useViewer = create<ViewerState>((set, get) => ({
         id,
         patch,
       ),
+    ),
+
+  setLayerConfidence: (id, conf) =>
+    set(
+      patchLayerOp({ layers: get().layers, layerOrder: get().layerOrder }, id, {
+        confidence: conf ?? undefined,
+      }),
     ),
 
   setSteps: (steps) => set({ steps }),

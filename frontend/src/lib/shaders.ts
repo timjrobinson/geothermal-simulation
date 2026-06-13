@@ -48,6 +48,19 @@ uniform int   uSteps;            // max ray-march steps
 uniform float uRefStep;          // reference step (m) for opacity correction
 uniform int   uBlend;            // 0=over (alpha), 1=additive, 2=MIP, 3=minIP (doc 06 §3.3)
 
+// Confidence-modulated opacity — the doc 07 §5.3 "honest view" (doc 06 §9.2 opacity
+// modulation). When uConfidenceOn>0.5, a co-registered confidence/σ volume (uConfidence,
+// sampled in the SAME [0,1]^3 texcoord as uVolume since favorability + its confidence share
+// the fused grid) scales each sample's opacity so low-confidence regions render faint. The
+// raw confidence value c is mapped to a [0,1] weight over [uConfMin,uConfMax]; uConfInvert
+// flips it so a σ (uncertainty) volume — high = LESS confident — modulates correctly.
+uniform sampler3D uConfidence;
+uniform float uConfidenceOn;     // 1.0 = modulate opacity by confidence, 0.0 = off
+uniform float uConfMin;          // confidence raw value mapped to weight 0
+uniform float uConfMax;          // confidence raw value mapped to weight 1
+uniform float uConfInvert;       // 1.0 = invert (σ-style: high value = low confidence)
+uniform float uConfFloor;        // minimum opacity weight so faint regions stay visible
+
 // Ray/box intersection (slab method). Returns vec2(tNear, tFar); tFar<tNear => miss.
 vec2 intersectBox(vec3 ro, vec3 rd, vec3 bmin, vec3 bmax) {
   vec3 inv = 1.0 / rd;
@@ -74,6 +87,19 @@ float applyScaling(float raw) {
   }
   float denom = max(hi - lo, 1e-12);
   return clamp((v - lo) / denom, 0.0, 1.0);
+}
+
+// Confidence → opacity weight in [uConfFloor, 1] (doc 07 §5.3 honest view). A NaN (no
+// coverage in the confidence volume) is treated as fully confident (weight 1) so a missing
+// confidence companion never hides the data; the explicit modulation is opt-in via uConfOn.
+float confidenceWeight(vec3 uvw) {
+  if (uConfidenceOn < 0.5) return 1.0;
+  float c = texture(uConfidence, uvw).r;
+  if (isnan(c)) return 1.0;
+  float denom = max(uConfMax - uConfMin, 1e-12);
+  float w = clamp((c - uConfMin) / denom, 0.0, 1.0);
+  if (uConfInvert > 0.5) w = 1.0 - w;     // σ-style: high uncertainty ⇒ low confidence
+  return mix(uConfFloor, 1.0, w);
 }
 
 void main() {
@@ -107,14 +133,15 @@ void main() {
     if (isnan(raw)) continue;                 // no-data skip (doc 06 §3.1)
     float vn = applyScaling(raw);
     vec4 c = texture(uTransferFn, vec2(vn, 0.5));
+    float cw = confidenceWeight(uvw);          // honest-view opacity modulation (doc 07 §5.3)
     if (uBlend == 2) {                        // MIP — keep the max value
-      if (!hit || vn > extN) { extN = vn; extC = c; }
+      if (!hit || vn > extN) { extN = vn; extC = c; extC.a *= cw; }
       hit = true;
     } else if (uBlend == 3) {                 // minIP — keep the min value
-      if (!hit || vn < extN) { extN = vn; extC = c; }
+      if (!hit || vn < extN) { extN = vn; extC = c; extC.a *= cw; }
       hit = true;
     } else {                                  // over / additive — accumulate front-to-back
-      float a = 1.0 - pow(1.0 - clamp(c.a * uOpacityGain, 0.0, 1.0), dt / uRefStep);
+      float a = 1.0 - pow(1.0 - clamp(c.a * uOpacityGain * cw, 0.0, 1.0), dt / uRefStep);
       if (uBlend == 1) {                      // additive — emission, no occlusion
         acc.rgb += a * c.rgb;
         acc.a   = max(acc.a, a);
