@@ -16,6 +16,7 @@ import { fetchMeta, fetchVolume } from "./lib/api";
 import { makeMockVolume } from "./lib/mockVolume";
 import { Scene } from "./scene/Scene";
 import { ControlPanel } from "./ui/ControlPanel";
+import { AnalysisPanel } from "./ui/AnalysisPanel";
 
 export function App() {
   const loadData = useViewer((s) => s.loadData);
@@ -32,6 +33,8 @@ export function App() {
   const layerOrder = useViewer((s) => s.layerOrder);
   const setCapabilities = useViewer((s) => s.setCapabilities);
   const capabilities = useViewer((s) => s.capabilities);
+  const analysisOpen = useViewer((s) => s.analysisOpen);
+  const setAnalysisOpen = useViewer((s) => s.setAnalysisOpen);
 
   const [mode, setMode] = useState<string>("");
 
@@ -100,6 +103,30 @@ export function App() {
     <div style={{ position: "absolute", inset: 0, overflow: "hidden" }}>
       <Scene />
       <ControlPanel />
+      {analysisOpen ? (
+        <AnalysisPanel />
+      ) : (
+        <button
+          onClick={() => setAnalysisOpen(true)}
+          style={{
+            position: "absolute",
+            bottom: 12,
+            right: 12,
+            zIndex: 11,
+            background: "#313244",
+            color: "#cdd6f4",
+            border: "1px solid #45475a",
+            borderRadius: 6,
+            padding: "6px 12px",
+            cursor: "pointer",
+            fontSize: 13,
+            fontFamily: "ui-sans-serif, system-ui, sans-serif",
+          }}
+          title="open the cross-plot / brushing analysis panel (doc 06 §10.3)"
+        >
+          Analysis ▸
+        </button>
+      )}
 
       {/* Title + status */}
       <div

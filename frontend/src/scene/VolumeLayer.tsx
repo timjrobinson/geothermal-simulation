@@ -6,9 +6,10 @@
 // both the in-shader accumulation and the GL blend equation.
 
 import { useEffect, useMemo, useRef } from "react";
-import { useFrame, useThree } from "@react-three/fiber";
+import { useFrame, useThree, type ThreeEvent } from "@react-three/fiber";
 import * as THREE from "three";
-import { useViewer } from "../store";
+import { useViewer, SELECTION_LAYER_ID } from "../store";
+import { pickNearestVoxel } from "../lib/brushing";
 import type { Layer, BlendMode } from "../lib/layers";
 import { makeData3DTexture } from "../lib/data3d";
 import { makeTransferFnTexture, updateTransferFnTexture } from "../lib/transferFn";
@@ -177,12 +178,39 @@ export function VolumeLayer({ layer, order }: { layer: Layer; order: number }) {
     if (tfTex) updateTransferFnTexture(tfTex, tf);
   }, [tf, tfTex]);
 
+  // Linked brushing — 3D pick → cross-plot inspector (doc 06 §10.3). Clicking a source
+  // volume resolves the front-face hit point (Engineering metres) to the nearest sampled
+  // fused cell and pushes its multi-property values to the store. The selection-mask overlay
+  // itself is not pickable (it would shadow the source volumes). Pointer-down + small-move
+  // gating keeps orbit drags from registering as picks.
+  const setPickedVoxel = useViewer((s) => s.setPickedVoxel);
+  const downRef = useRef<{ x: number; y: number } | null>(null);
+  const pickable = layer.id !== SELECTION_LAYER_ID;
+
+  const onPointerDown = (e: ThreeEvent<PointerEvent>) => {
+    downRef.current = { x: e.clientX, y: e.clientY };
+  };
+  const onPointerUp = (e: ThreeEvent<PointerEvent>) => {
+    const d = downRef.current;
+    downRef.current = null;
+    if (!d) return;
+    if (Math.hypot(e.clientX - d.x, e.clientY - d.y) > 4) return; // a drag (orbit), not a pick
+    const sample = useViewer.getState().fusedSample;
+    if (!sample) return;
+    e.stopPropagation();
+    const p = e.point; // Engineering XYZ metres of the hit on the box face
+    const readout = pickNearestVoxel(sample, [p.x, p.y, p.z]);
+    setPickedVoxel(readout);
+  };
+
   if (!material || !aabb || !layer.visible) return null;
 
   return (
     <mesh
       position={center as unknown as [number, number, number]}
       renderOrder={1 + order}
+      onPointerDown={pickable ? onPointerDown : undefined}
+      onPointerUp={pickable ? onPointerUp : undefined}
     >
       <boxGeometry args={[size[0], size[1], size[2]]} />
       <primitive object={material} attach="material" />

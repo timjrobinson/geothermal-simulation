@@ -29,10 +29,16 @@ import {
   tfFromMeta,
 } from "./lib/layers";
 import type { SurfaceGrid, XYExtent } from "./lib/terrain";
+import type { FusedModelOut, FusedSampleOut } from "./lib/fusion";
+import { selectionToVolume, type VoxelReadout } from "./lib/brushing";
 
 // Re-export so existing importers (and tests) keep resolving these from the store.
 export { tfFromMeta };
 export type { Layer, BlendMode };
+
+// Stable layer id for the cross-plot selection-mask overlay (doc 06 §10.3). One overlay is
+// re-used (replaced in place) as the brush changes so it never accumulates layers.
+export const SELECTION_LAYER_ID = "selection-mask";
 
 // M0 capabilities shape (kept for the minor capabilities readout).
 export interface Capabilities {
@@ -80,6 +86,17 @@ interface ViewerState extends LayerCollection {
   // ── M0 capabilities (minor) ───────────────────────────────────────────────────────
   capabilities: Capabilities | null;
 
+  // ── analysis / linked brushing (doc 06 §10.3, doc 07 §3) ──────────────────────────
+  // The active fused grid + its co-located sample feed the cross-plot / histogram /
+  // correlation panels. `selection` is the set of LOCAL sample-row indices brushed in the
+  // cross-plot; it drives the 3D selection-mask overlay layer. `pickedVoxel` is the 3D pick
+  // → multi-property inspector readout. `analysisOpen` toggles the panel.
+  analysisOpen: boolean;
+  fusedGrid: FusedModelOut | null;
+  fusedSample: FusedSampleOut | null;
+  selection: number[]; // local sample-row indices (brushing key)
+  pickedVoxel: VoxelReadout | null;
+
   // ── derived: union AABB across visible volume layers (camera framing / clip basis) ──
   sceneAABB: AABB | null;
 
@@ -126,6 +143,15 @@ interface ViewerState extends LayerCollection {
   setSlicePos: (p: number) => void;
   setSliceOpacity: (o: number) => void;
   setCapabilities: (c: Capabilities) => void;
+
+  // analysis / linked brushing actions (doc 06 §10.3).
+  setAnalysisOpen: (b: boolean) => void;
+  setFusedAnalysis: (grid: FusedModelOut | null, sample: FusedSampleOut | null) => void;
+  // Brush a set of cross-plot rows -> store the selection AND (re)build the 3D overlay
+  // layer so the brushed voxels highlight in the scene. An empty selection clears both.
+  setSelection: (rows: number[]) => void;
+  clearSelection: () => void;
+  setPickedVoxel: (v: VoxelReadout | null) => void;
 }
 
 // Recompute the union AABB over all visible volume layers (doc 06 §2.2 framing basis).
@@ -181,6 +207,12 @@ export const useViewer = create<ViewerState>((set, get) => ({
   sliceOpacity: 1.0,
   capabilities: null,
   sceneAABB: null,
+
+  analysisOpen: false,
+  fusedGrid: null,
+  fusedSample: null,
+  selection: [],
+  pickedVoxel: null,
 
   setLoading: (loading) => set({ loading }),
   setError: (error) => set({ error }),
@@ -300,6 +332,69 @@ export const useViewer = create<ViewerState>((set, get) => ({
   setSlicePos: (slicePos) => set({ slicePos }),
   setSliceOpacity: (sliceOpacity) => set({ sliceOpacity }),
   setCapabilities: (capabilities) => set({ capabilities }),
+
+  setAnalysisOpen: (analysisOpen) => set({ analysisOpen }),
+
+  setFusedAnalysis: (fusedGrid, fusedSample) =>
+    set({ fusedGrid, fusedSample, selection: [], pickedVoxel: null }),
+
+  setSelection: (rows) => {
+    const { fusedGrid, fusedSample } = get();
+    // Drop any existing overlay first so we rebuild it fresh (or clear it).
+    let next: LayerCollection = removeLayerOp(
+      { layers: get().layers, layerOrder: get().layerOrder },
+      SELECTION_LAYER_ID,
+    );
+    if (rows.length > 0 && fusedGrid && fusedSample) {
+      // Build a highlight overlay volume: selected cells = 1.0, rest = NaN (doc 06 §10.3).
+      const vol = selectionToVolume(fusedSample, rows, {
+        origin: fusedGrid.origin,
+        spacing: fusedGrid.spacing,
+      });
+      const overlayMeta: PropertyModelMeta = {
+        id: SELECTION_LAYER_ID,
+        property: "selection",
+        canonicalUnit: "",
+        scaling: "linear",
+        colormap: "magma",
+        displayRange: [0, 1],
+        shape: vol.shape as [number, number, number],
+        origin: vol.origin as [number, number, number],
+        spacing: vol.spacing as [number, number, number],
+        levels: 1,
+        stats: { min: 1, max: 1, p1: 1, p99: 1 },
+        frame: null,
+        hasSigma: false,
+      };
+      const layer = makeVolumeLayer(overlayMeta, vol, {
+        id: SELECTION_LAYER_ID,
+        name: `Selection (${rows.length} cells)`,
+      });
+      // A bright, opaque, additive highlight that floats above the source volumes.
+      layer.blend = "additive";
+      layer.opacity = 1;
+      layer.clip = false;
+      layer.transferFn = {
+        ...layer.transferFn,
+        colormap: "magma",
+        domainMin: 0,
+        domainMax: 1,
+        opacity: 1,
+      };
+      next = addLayerOp(next, layer);
+    }
+    set({ ...withScene(next), selection: rows });
+  },
+
+  clearSelection: () => {
+    const next = removeLayerOp(
+      { layers: get().layers, layerOrder: get().layerOrder },
+      SELECTION_LAYER_ID,
+    );
+    set({ ...withScene(next), selection: [] });
+  },
+
+  setPickedVoxel: (pickedVoxel) => set({ pickedVoxel }),
 }));
 
 // Convenience selectors (avoid re-deriving in components).

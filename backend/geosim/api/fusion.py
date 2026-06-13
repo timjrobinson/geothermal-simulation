@@ -1,0 +1,434 @@
+"""Fusion API router — fused-grid create/resample/get + artifact discovery (doc 07 §6, doc 04 §9.2).
+
+Wired into :func:`geosim.api.create_app`. Endpoints (doc 07 §6 backend API sketch):
+
+- ``POST /fused`` — create a regular-voxel FusedEarthModel container grid for a project
+  (auto-resolution per doc 07 §1.1, or an explicit ``spacing``/``bbox`` override).
+- ``POST /fused/{gridId}/resample`` — resample a native PropertyModel INTO the grid as a
+  footprint-honest, σ-propagated :class:`~geosim.catalog.FusedLayer` (doc 07 §2).
+- ``GET /fused/{gridId}`` — the fused-model handle: grid geometry + its resampled layers.
+- ``POST /fused/{gridId}/sample`` — co-located multi-volume sampling → feature matrix +
+  cell-index mask (doc 07 §3.1).
+- ``POST /fused/{gridId}/crossplot`` — 2D/3D scatter or 2D density + histogram +
+  correlation-matrix payloads for the analysis panels (doc 07 §3.2).
+- ``POST /fused/{gridId}/cluster`` — k-means / GMM clustering → categorical class volume
+  (+ GMM per-class probability volumes) written as derived PropertyModels; synchronous for
+  small working sets, job-based for whole-grid runs (doc 07 §3.3/§3.4).
+- ``GET /projects/{pid}/artifacts`` — catalog discovery for the frontend (doc 04 §7/§9.2):
+  bbox/kind/method/property/time-filtered :class:`ArtifactSummary` list, via the
+  Engineering-metre bbox helper :func:`geosim.catalog.query_artifacts_bbox` (doc 04 §2.5).
+
+Shares the catalog session + ``storage_root`` injected on ``app.state`` by
+:func:`create_app`; reuses :mod:`geosim.fusion` for all compute (never reimplements it).
+"""
+
+from __future__ import annotations
+
+import json
+from typing import Any
+
+from fastapi import APIRouter, HTTPException, Query, Request
+from pydantic import BaseModel
+from sqlalchemy.orm import Session
+
+from geosim.catalog import (
+    Bbox3D,
+    Dataset,
+    FusedModel,
+    Project,
+    PropertyModel,
+    query_artifacts_bbox,
+)
+from geosim.fusion import (
+    SYNC_CELL_LIMIT,
+    build_fused_model,
+    cluster_fused,
+    correlation_matrix,
+    crossplot,
+    fused_grid_from_row,
+    histogram,
+    resample_to_fused,
+    sample_fused,
+)
+from geosim.jobs import JobRunner, ProgressReporter
+from geosim.storage import ProjectLayout
+
+__all__ = ["build_fusion_router"]
+
+
+# ──────────────────────────────── wire shapes (doc 07 §6) ────────────────────────────────
+
+
+class FusedCreate(BaseModel):
+    """``POST /fused`` body (doc 07 §1.1)."""
+
+    project_id: str
+    name: str = "fused"
+    source_property_model_ids: list[str] | None = None
+    bbox: dict[str, float] | None = None
+    spacing: list[float] | None = None  # explicit [dz,dy,dx] override of auto-resolution
+
+
+class FusedLayerOut(BaseModel):
+    layer_id: str
+    property: str
+    source_property_model_id: str
+    source_version: str
+    method: str
+    sigma_array: str | None
+    coverage_mask: str | None
+
+
+class FusedModelOut(BaseModel):
+    """``GET /fused/{gridId}`` (doc 07 §6)."""
+
+    id: str
+    project_id: str
+    grid_type: str
+    origin: list[float]
+    spacing: list[float]
+    shape: list[int]
+    n_cells: int
+    bbox: dict[str, float]
+    layers: list[FusedLayerOut]
+
+
+class ResampleRequest(BaseModel):
+    """``POST /fused/{gridId}/resample`` body (doc 07 §2.4)."""
+
+    property_model_id: str
+    method: str = "auto"
+    interp_space: str = "auto"
+    respect_footprint: bool = True
+    cache: bool = True
+
+
+class ResampledLayerOut(BaseModel):
+    layer_id: str
+    fused_model_id: str
+    property: str
+    value_array: str
+    sigma_array: str
+    coverage_mask: str
+    method: str
+    interp_space: str
+    cached: bool
+
+
+class SampleRequest(BaseModel):
+    """``POST /fused/{gridId}/sample`` body (doc 07 §3.1)."""
+
+    properties: list[str] | None = None  # None ⇒ all resampled layers
+    mode: str = "all"  # "all" (listwise) | "any" (for histograms)
+    bbox: dict[str, float] | None = None  # Engineering-metre clip box (region of interest)
+
+
+class SampleOut(BaseModel):
+    """Co-located feature-matrix payload (doc 07 §3.1)."""
+
+    properties: list[str]
+    n: int
+    features: list[list[float]]
+    cell_index: list[int]
+    coords: list[list[float]]
+    grid_shape: list[int]
+    mode: str
+
+
+class CrossplotRequest(BaseModel):
+    """``POST /fused/{gridId}/crossplot`` body (doc 07 §3.2)."""
+
+    axes: list[str] | None = None  # 2 or 3 properties for the scatter/density
+    color_by: str | None = None  # "depth" | a property name
+    properties: list[str] | None = None  # sample subset; None ⇒ all
+    bbox: dict[str, float] | None = None
+    histogram_property: str | None = None  # if set, add a 1D histogram of this property
+    kde: bool = False
+    bins: int = 64
+    correlation: bool = True  # include the correlation matrix
+
+
+class ClusterRequest(BaseModel):
+    """``POST /fused/{gridId}/cluster`` body (doc 07 §3.3)."""
+
+    project_id: str
+    algorithm: str = "kmeans"  # "kmeans" | "gmm"
+    n_clusters: int = 3
+    properties: list[str] | None = None
+    bbox: dict[str, float] | None = None
+    write_volumes: bool = True
+    force_job: bool = False  # force the job-based path regardless of working-set size
+
+
+class ArtifactSummary(BaseModel):
+    """A discoverable catalog artifact (doc 04 §7 ``/artifacts`` → frontend)."""
+
+    id: str
+    kind: str  # propertyModel|fusedModel|feature|observation
+    property: str | None = None
+    method: str | None = None
+    bbox: dict[str, float]
+    time_extent: dict[str, Any] | None = None
+
+
+def _kind_of(row: object) -> str:
+    if isinstance(row, PropertyModel):
+        return "propertyModel"
+    if isinstance(row, FusedModel):
+        return "fusedModel"
+    return type(row).__name__.lower()
+
+
+def build_fusion_router(session_dep: Any) -> APIRouter:
+    """Build the fusion router wired to the app's catalog + storage DI (doc 04 §9)."""
+    router = APIRouter(tags=["fusion"])
+
+    def _fem_or_404(session: Session, grid_id: str) -> FusedModel:
+        fem = session.get(FusedModel, grid_id)
+        if fem is None:
+            raise HTTPException(status_code=404, detail="fused model not found")
+        return fem
+
+    def _layers_out(session: Session, fem: FusedModel) -> list[FusedLayerOut]:
+        return [
+            FusedLayerOut(
+                layer_id=lay.id, property=lay.property,
+                source_property_model_id=lay.source_property_model_id,
+                source_version=lay.source_version,
+                method=json.loads(lay.resample_op_json).get("method", ""),
+                sigma_array=lay.sigma_array, coverage_mask=lay.valid_mask,
+            )
+            for lay in fem.layers
+        ]
+
+    def _fem_out(session: Session, fem: FusedModel) -> FusedModelOut:
+        grid = fused_grid_from_row(fem)
+        return FusedModelOut(
+            id=fem.id, project_id=fem.project_id, grid_type=fem.grid_type,
+            origin=list(grid.origin), spacing=list(grid.spacing), shape=list(grid.shape),
+            n_cells=grid.n_cells, bbox=json.loads(fem.bbox_json),
+            layers=_layers_out(session, fem),
+        )
+
+    # ──────────────────────────────── POST /fused ────────────────────────────────
+    @router.post("/fused", response_model=FusedModelOut, status_code=201)
+    def create_fused(body: FusedCreate, request: Request, session: Session = session_dep):
+        if session.get(Project, body.project_id) is None:
+            raise HTTPException(status_code=404, detail="project not found")
+        layout = ProjectLayout(request.app.state.storage_root, body.project_id)
+        spacing = tuple(body.spacing) if body.spacing else None  # type: ignore[assignment]
+        try:
+            fem, _grid = build_fused_model(
+                session, layout, body.project_id,
+                source_property_model_ids=body.source_property_model_ids,
+                bbox=body.bbox, spacing=spacing, name=body.name,
+            )
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e)) from e
+        return _fem_out(session, fem)
+
+    # ──────────────────────── POST /fused/{gridId}/resample ───────────────────────
+    @router.post("/fused/{grid_id}/resample", response_model=ResampledLayerOut, status_code=201)
+    def resample(
+        grid_id: str, body: ResampleRequest, request: Request, session: Session = session_dep
+    ):
+        fem = _fem_or_404(session, grid_id)
+        try:
+            ref = resample_to_fused(
+                session, fem, body.property_model_id,
+                method=body.method, interp_space=body.interp_space,  # type: ignore[arg-type]
+                respect_footprint=body.respect_footprint, cache=body.cache,
+                storage_root=request.app.state.storage_root,
+            )
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e)) from e
+        return ResampledLayerOut(
+            layer_id=ref.layer_id, fused_model_id=ref.fused_model_id, property=ref.property,
+            value_array=ref.value_array, sigma_array=ref.sigma_array,
+            coverage_mask=ref.coverage_mask, method=ref.method,
+            interp_space=ref.interp_space, cached=ref.cached,
+        )
+
+    # ──────────────────────────────── GET /fused/{gridId} ────────────────────────────────
+    @router.get("/fused/{grid_id}", response_model=FusedModelOut)
+    def get_fused(grid_id: str, session: Session = session_dep):
+        return _fem_out(session, _fem_or_404(session, grid_id))
+
+    # ──────────────────────── POST /fused/{gridId}/sample (doc 07 §3.1) ───────────────────────
+    @router.post("/fused/{grid_id}/sample", response_model=SampleOut)
+    def sample(
+        grid_id: str, body: SampleRequest, request: Request, session: Session = session_dep
+    ):
+        fem = _fem_or_404(session, grid_id)
+        try:
+            s = sample_fused(
+                session, fem, body.properties, mode=body.mode, bbox=body.bbox,
+                storage_root=request.app.state.storage_root,
+            )
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e)) from e
+        return SampleOut(
+            properties=s.properties, n=s.n, features=s.features.tolist(),
+            cell_index=s.cell_index.tolist(), coords=s.coords.tolist(),
+            grid_shape=list(s.grid_shape), mode=s.mode,
+        )
+
+    # ──────────────────── POST /fused/{gridId}/crossplot (doc 07 §3.2) ────────────────────
+    @router.post("/fused/{grid_id}/crossplot")
+    def crossplot_route(
+        grid_id: str, body: CrossplotRequest, request: Request, session: Session = session_dep
+    ):
+        fem = _fem_or_404(session, grid_id)
+        try:
+            s = sample_fused(
+                session, fem, body.properties, mode="all", bbox=body.bbox,
+                storage_root=request.app.state.storage_root,
+            )
+            payload: dict[str, Any] = {"n": s.n, "properties": s.properties}
+            if body.axes:
+                payload["crossplot"] = crossplot(
+                    s, body.axes, color_by=body.color_by, bins=body.bins
+                )
+            if body.histogram_property:
+                payload["histogram"] = histogram(
+                    s, body.histogram_property, bins=body.bins, kde=body.kde
+                )
+            if body.correlation:
+                payload["correlation"] = correlation_matrix(s)
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e)) from e
+        return payload
+
+    # ──────────────────── POST /fused/{gridId}/cluster (doc 07 §3.3/§3.4) ────────────────────
+    @router.post("/fused/{grid_id}/cluster")
+    def cluster_route(
+        grid_id: str, body: ClusterRequest, request: Request, session: Session = session_dep
+    ):
+        fem = _fem_or_404(session, grid_id)
+        if session.get(Project, body.project_id) is None:
+            raise HTTPException(status_code=404, detail="project not found")
+        storage_root = request.app.state.storage_root
+        layout = ProjectLayout(storage_root, body.project_id)
+        grid = fused_grid_from_row(fem)
+
+        # Sync for small working sets; job-based for whole-grid / forced (doc 07 §3.4).
+        job_based = body.force_job or grid.n_cells > SYNC_CELL_LIMIT
+        if not job_based:
+            try:
+                result = cluster_fused(
+                    session, layout, fem,
+                    properties=body.properties, algorithm=body.algorithm,
+                    n_clusters=body.n_clusters, bbox=body.bbox,
+                    write_volumes=body.write_volumes, storage_root=storage_root,
+                )
+            except ValueError as e:
+                raise HTTPException(status_code=400, detail=str(e)) from e
+            return {"mode": "sync", **result.to_payload()}
+
+        runner: JobRunner = request.app.state.job_runner
+        session_factory = request.app.state.session_factory
+
+        def _job(params: dict[str, Any], reporter: ProgressReporter) -> dict[str, Any]:
+            job_session = session_factory()
+            try:
+                job_fem = job_session.get(FusedModel, grid_id)
+                result = cluster_fused(
+                    job_session, layout, job_fem,
+                    properties=params.get("properties"), algorithm=params["algorithm"],
+                    n_clusters=params["n_clusters"], bbox=params.get("bbox"),
+                    write_volumes=params["write_volumes"], storage_root=storage_root,
+                    progress=reporter,
+                )
+                return result.to_payload()
+            finally:
+                job_session.close()
+
+        job_id = runner.enqueue(
+            "fuse:cluster",
+            {
+                "algorithm": body.algorithm, "n_clusters": body.n_clusters,
+                "properties": body.properties, "bbox": body.bbox,
+                "write_volumes": body.write_volumes,
+            },
+            _job,
+            project_id=body.project_id,
+        )
+        return {"mode": "job", "job_id": job_id}
+
+    # ──────────────────────── GET /projects/{pid}/artifacts ───────────────────────
+    @router.get("/projects/{pid}/artifacts", response_model=list[ArtifactSummary])
+    def list_artifacts(
+        pid: str,
+        session: Session = session_dep,
+        bbox: str | None = Query(default=None, description="xmin,xmax,ymin,ymax,zmin,zmax"),
+        kind: str | None = Query(default=None),
+        method: str | None = Query(default=None),
+        property: str | None = Query(default=None),
+        t: float | None = Query(default=None),
+    ):
+        """List project artifacts for frontend discovery (doc 04 §7/§9.2).
+
+        ``bbox`` (Engineering metres) filters via the §2.5 helper; ``None`` returns the
+        whole-project extent. ``kind``/``method``/``property``/``t`` are post-filters.
+        """
+        if session.get(Project, pid) is None:
+            raise HTTPException(status_code=404, detail="project not found")
+        query_box = _parse_bbox(bbox) if bbox else _project_box(session, pid)
+        kinds = [kind] if kind else None
+        rows = query_artifacts_bbox(session, pid, query_box, kinds=kinds)
+        out: list[ArtifactSummary] = []
+        for row in rows:
+            summary = _to_summary(session, row)
+            if property is not None and summary.property != property:
+                continue
+            if method is not None and summary.method != method:
+                continue
+            if t is not None and not _time_contains(summary.time_extent, t):
+                continue
+            out.append(summary)
+        return out
+
+    return router
+
+
+def _to_summary(session: Session, row: object) -> ArtifactSummary:
+    kind = _kind_of(row)
+    prop = getattr(row, "property", None)
+    ds = session.get(Dataset, row.dataset_id)
+    method = ds.method if ds is not None else None
+    time_extent = None
+    if ds is not None and ds.time_extent_json:
+        time_extent = json.loads(ds.time_extent_json)
+    return ArtifactSummary(
+        id=row.id, kind=kind, property=prop, method=method,
+        bbox=json.loads(row.bbox_json), time_extent=time_extent,
+    )
+
+
+def _parse_bbox(spec: str) -> Bbox3D:
+    parts = [float(v) for v in spec.split(",")]
+    if len(parts) != 6:
+        raise HTTPException(status_code=400, detail="bbox must be xmin,xmax,ymin,ymax,zmin,zmax")
+    return Bbox3D(*parts)
+
+
+def _project_box(session: Session, pid: str) -> Bbox3D:
+    project = session.get(Project, pid)
+    frame = project.spatial_frame
+    roi = json.loads(frame.roi_json)
+    dr = json.loads(frame.depth_range_json)
+    return Bbox3D(
+        float(roi["xmin"]), float(roi["xmax"]),
+        float(roi["ymin"]), float(roi["ymax"]),
+        float(dr["zmin"]), float(dr["zmax"]),
+    )
+
+
+def _time_contains(time_extent: dict[str, Any] | None, t: float) -> bool:
+    if not time_extent:
+        return False
+    lo = time_extent.get("tmin", time_extent.get("start"))
+    hi = time_extent.get("tmax", time_extent.get("end"))
+    if lo is None or hi is None:
+        return True
+    return float(lo) <= t <= float(hi)

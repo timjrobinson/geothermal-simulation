@@ -45,6 +45,7 @@ from geosim.plugins import get_registry
 from geosim.storage import ensure_project_layout
 
 from .frame_io import frame_from_dict, frame_from_row, frame_row_kwargs, frame_to_dict
+from .fusion import build_fusion_router
 from .property_models import build_property_model_router
 from .schemas import (
     DemoJobRequest,
@@ -215,6 +216,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # PropertyModel read surface (volume/slice/zarr) — shares the catalog session +
     # storage_root DI off app.state (doc 04 §9.2/§9.3, doc 06 §1.3/§12).
     app.include_router(build_property_model_router(session_dep))
+
+    # Fusion surface: fused-grid create/resample/get + artifact discovery (doc 07 §6,
+    # doc 04 §7/§9.2). Shares the same catalog session + storage_root DI off app.state.
+    app.include_router(build_fusion_router(session_dep))
 
     # ──────────────────────────────── capabilities (doc 08 §7.1) ────────────────────────────
     @app.get("/api/capabilities")
