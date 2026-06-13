@@ -54,7 +54,9 @@ class MinCurvatureResult:
     dls: np.ndarray  # dogleg severity per interval, °/30 m (len N; dls[0]=0)
 
 
-def min_curvature_positions(deviation_survey, wellhead, kb_elev: float | None = None) -> MinCurvatureResult:
+def min_curvature_positions(
+    deviation_survey, wellhead, kb_elev: float | None = None
+) -> MinCurvatureResult:
     """Minimum-curvature integration of a deviation survey (doc 09 §4.3, industry standard).
 
     Parameters

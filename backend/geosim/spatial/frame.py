@@ -171,7 +171,7 @@ class SpatialFrame:
 
     def georeference(self, *, horizontal_crs: str, anchor: Anchor,
                      vertical_datum: str | None = None, rotation_deg: float = 0.0,
-                     status: GeorefStatus = GeorefStatus.ANCHORED) -> "SpatialFrame":
+                     status: GeorefStatus = GeorefStatus.ANCHORED) -> SpatialFrame:
         """Promote local → georeferenced (doc 01 §2). Bulk arrays are NOT reprocessed —
         only frame metadata changes (arrays are always Engineering). Assigning an anchor
         sets ``georef_status='anchored'``, NOT ``'validated'`` — it does not assert the
@@ -188,7 +188,7 @@ class SpatialFrame:
     @classmethod
     def for_real_site(cls, *, lon: float, lat: float, surface_elev: float,
                       roi: Aabb, depth_range: DepthRange,
-                      vertical_datum: str = "EPSG:3855") -> "SpatialFrame":
+                      vertical_datum: str = "EPSG:3855") -> SpatialFrame:
         """Build a georeferenced frame anchored at a real (lon, lat) with auto-UTM CRS.
 
         Anchor defaults to the ROI centroid at surface elevation, keeping Engineering

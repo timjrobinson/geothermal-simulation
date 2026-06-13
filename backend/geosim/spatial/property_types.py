@@ -12,7 +12,7 @@ handle it. Plugins register new keys here (doc 08 §4b); doc 02 §1 reserves
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 from .units import CANONICAL_UNITS
 
@@ -32,9 +32,12 @@ class PropertyType:
     categorical: bool = False  # lithology_class etc. (doc 02 §10.2)
 
     def __post_init__(self) -> None:
-        if not self.categorical and self.canonical_unit != CANONICAL_UNITS.get(self.key, self.canonical_unit):
-            # Keep the unit registry and property registry from silently disagreeing.
-            object.__setattr__(self, "canonical_unit", CANONICAL_UNITS.get(self.key, self.canonical_unit))
+        # Keep the unit registry and property registry from silently disagreeing.
+        if self.categorical:
+            return
+        canon = CANONICAL_UNITS.get(self.key, self.canonical_unit)
+        if self.canonical_unit != canon:
+            object.__setattr__(self, "canonical_unit", canon)
 
 
 class PropertyTypeRegistry:
@@ -93,7 +96,7 @@ def _seed() -> None:
         PropertyType("water_saturation", "dimensionless", "Blues", "linear", (0.0, 1.0), "linear"),
         PropertyType("fracture_density", "dimensionless", "hot", "linear", (0.0, 1.0), "linear"),
         PropertyType("lithology_class", "dimensionless", "tab20", "linear", None, "linear",
-                     categorical=True, description="categorical lithology label / class probability"),
+                     categorical=True, description="categorical lithology label / class prob"),
     ]
     for pt in defs:
         REGISTRY.register(pt, replace=True)

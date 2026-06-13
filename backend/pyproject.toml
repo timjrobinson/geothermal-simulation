@@ -71,6 +71,9 @@ target-version = "py311"
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B"]
+# str-mixin enums (class X(str, Enum)) are intentional for clean JSON/SQL serialization;
+# the StrEnum auto-fix changes str() semantics, so we keep the mixin pattern.
+ignore = ["UP042"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
