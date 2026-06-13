@@ -16,6 +16,20 @@
 > - Native formats → OVERVIEW §3 (the format-contract table).
 > - We do **not** invent inversion here — forward only. Inversion is doc 10 (later).
 
+> ### ⚠️ Revision — user decisions applied (see `DECISIONS.md`)
+> - **Forward-model fidelity:** build **rigorous (T1) physics first for the 2–3 key
+>   methods — MT, gravity, and seismic** — rather than T0-plausible-for-all-first.
+>   Other methods still use the T0 "degrade-the-truth"/analytic path initially and
+>   upgrade to T1 later. (The two-tier `ForwardModel` contract is unchanged; only the
+>   *build order/priority* changes — rigorous solvers come first for MT/gravity/seismic.)
+> - **Flagship scenario = `great-basin-v1`** (Basin & Range / Nevada hydrothermal play) — confirmed.
+> - **Rock-property values = defensible textbook defaults now**, refined later — confirmed.
+> - **Extra properties required:** because doc 07 adopts the *full* rock-physics table
+>   (alteration index, microseismic→fracture density, Waxman-Smits/dual-water,
+>   permeability proxies), the ground-truth earth must also emit the supporting
+>   property/state fields those transforms consume (clay/alteration fraction,
+>   fracture density, salinity, porosity) so fusion outputs can be validated against truth.
+
 ---
 
 ## 1. What this module is (and is not)

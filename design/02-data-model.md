@@ -458,10 +458,16 @@ VersionInfo {
 
 ## 10. On-disk conventions
 
-### 10.1 Store layout (under the project store root — doc 04 owns the root path)
+### 10.1 Store layout (illustrative — **doc 04 §3 is authoritative** for directory names)
+
+> The sketch below shows the *grouping by bulk-type*; the actual on-disk directory
+> names and root path are owned by **doc 04 §3** (e.g. `arrays/ grids/ meshes/
+> vectors/ points/ raw/ cache/`). Files are named by the dataset's ULID id (which
+> already encodes kind, doc 02 §1). What doc 02 owns is the **Zarr-group-internal
+> layout** (§10.2) and the bulk-format-per-primitive mapping — not the folder names.
 
 ```
-<project>/
+<project>/                                   # (doc-04 directory names differ — see doc 04 §3)
   raw/        <sha256>.<ext>                 # verbatim source files (provenance roots)
   zarr/       <datasetId>.zarr/              # property models, fused models, 4D volumes
   cog/        <datasetId>.tif                # 2D grids/rasters (InSAR scenes, anomaly grids)

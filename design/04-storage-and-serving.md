@@ -12,6 +12,40 @@
 > array is in Engineering coordinates (doc 01 §1, decision #2). Things this doc
 > *needs from doc 02* are flagged inline with **[NEEDS-02]**.
 
+> ### ⚠️ Revision — user decisions applied (see `DECISIONS.md`)
+> Two drafted defaults below were **overridden by the user** and are authoritative:
+> 1. **Catalog DB = PostgreSQL + PostGIS from the start** (not SQLite+SpatiaLite).
+>    The SQLAlchemy portability layer and Engineering-metre R-Tree/GiST bbox index
+>    still stand; we simply target PostGIS as the primary engine. A project is still
+>    a self-contained directory for its *array/raw/cache* stores, but catalog rows
+>    live in a Postgres database (one schema or DB per project) — export/zip bundles
+>    the array stores + a `pg_dump`. SQLite remains an optional lightweight path.
+> 2. **Async jobs = RQ + Redis from the start** (not FastAPI BackgroundTasks).
+>    The job contract (table + endpoints + WS) is unchanged; the executor is RQ
+>    workers against Redis from day one, giving crash-isolation and parallel ingest.
+> Resolved secondary items: **slice default = raw float32 to client** (GPU transfer
+> function); **artifact versioning = keep all versions** (content-addressed bulk).
+> Where prose below still says "SQLite default" / "BackgroundTasks default," read it
+> as the documented *fallback/portability* path, not the chosen default.
+
+> ### 🔗 Reconciliation with doc 02 (now final — these resolve every `[NEEDS-02]`)
+> The data model is locked; this doc aligns to it:
+> - **IDs are ULIDs**, kind-prefixed (`ds_ pm_ obs_ feat_ fem_ prov_ well_ ver_ run_`) —
+>   *not* UUIDv7. (Doc 02 §1/§9 owns identity.)
+> - **`Dataset.kind` ∈** `observation | propertyModel | feature | fusedModel` (doc 02 §2).
+> - **`PropertyModel.support.kind` ∈** `volume | grid2d | mesh` (doc 02 §4) — the
+>   `property_models.support` column uses these, not `regular/octree/unstructured`.
+> - **Observation classification = `geometryKind` ∈** `points | soundings | profile2d |
+>   traces | raster2d | wellcurve | tensor` (doc 02 §3) — replaces the ad-hoc `obs_type`.
+> - **`feature_type` = `featureKind` ∈** `surface | fault | unitSolid | wellPath |
+>   pointCloud | fractureNetwork | polyline` (doc 02 §5).
+> - **Uncertainty array** = a co-registered sibling Zarr array named `<property>_sigma`
+>   (+ optional `<property>_doi`), variance-correct pyramid (doc 02 §6, §10.3).
+> - **Open `meta_json` / `props_json` columns** map to doc 02's `methodData` /
+>   `attributes` blobs — open JSONB, no schema owed.
+> - **Directory layout in §3 is authoritative** over doc 02 §10.1's sketch; dataset
+>   files are named by their ULID id (which already encodes kind).
+
 ---
 
 ## 0. Design constraints (inherited)
@@ -75,7 +109,8 @@ rewrites the index. A *derived* lat/lon bbox can be computed on demand from the
 
 ### 2.3 Schema
 
-ID convention: `TEXT` UUIDv7 (time-ordered, sortable) PKs. `created_at`/
+ID convention: `TEXT` **ULID** (time-ordered, sortable, kind-prefixed per doc 02 §1:
+`ds_ pm_ obs_ feat_ fem_ ...`) PKs. `created_at`/
 `updated_at` epoch-ms on every table. JSON columns hold open/extensible metadata
 (the R&D-plugin requirement, `OVERVIEW.md` §4) so new survey methods add fields
 without migrations.
@@ -116,10 +151,10 @@ CREATE TABLE datasets (
   project_id    TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
   name          TEXT NOT NULL,
   method        TEXT NOT NULL,        -- 'gravity'|'ert'|'mt'|'seismic'|'insar'|... (OVERVIEW §3)
-  kind          TEXT NOT NULL,        -- 'observation'|'property_model'|'feature'|'fused' (provenance origin)
+  kind          TEXT NOT NULL,        -- 'observation'|'propertyModel'|'feature'|'fusedModel' (doc 02 §2)
   status        TEXT NOT NULL,        -- 'ingesting'|'ready'|'error'
   time_extent_json TEXT,              -- {t0,t1,n} for 4D, null for static
-  meta_json     TEXT,                 -- method-specific (acquisition params, [NEEDS-02])
+  meta_json     TEXT,                 -- method-specific blob (doc 02 methodData/acquisition)
   created_at    INTEGER NOT NULL,
   updated_at    INTEGER NOT NULL
 );
@@ -133,7 +168,7 @@ CREATE TABLE property_models (
   project_id    TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
   property      TEXT NOT NULL,        -- 'resistivity'|'density'|'velocity'|... (doc 01 §5 registry)
   canonical_unit TEXT NOT NULL,       -- from doc 01 units registry
-  support       TEXT NOT NULL,        -- 'regular'|'octree'|'unstructured'  [NEEDS-02]
+  support       TEXT NOT NULL,        -- 'volume'|'grid2d'|'mesh' (doc 02 §4 support.kind)
   store_uri     TEXT NOT NULL,        -- relative path to .zarr group (§4)
   store_format  TEXT NOT NULL DEFAULT 'zarr',
   shape_json    TEXT NOT NULL,        -- [nz,ny,nx] or [nt,nz,ny,nx]
@@ -143,7 +178,7 @@ CREATE TABLE property_models (
   has_time      INTEGER NOT NULL DEFAULT 0,
   pyramid_levels INTEGER NOT NULL DEFAULT 1,  -- # multiresolution levels (§5)
   stats_json    TEXT,                 -- {min,max,mean,p1,p99,histogram} for transfer fn
-  uncertainty_uri TEXT,               -- sibling zarr array (optional)  [NEEDS-02]
+  uncertainty_uri TEXT,               -- sibling zarr array '<property>_sigma' (doc 02 §6)
   created_at    INTEGER NOT NULL,
   updated_at    INTEGER NOT NULL
 );
@@ -155,14 +190,14 @@ CREATE TABLE observations (
   id            TEXT PRIMARY KEY,
   dataset_id    TEXT NOT NULL REFERENCES datasets(id) ON DELETE CASCADE,
   project_id    TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
-  obs_type      TEXT NOT NULL,        -- 'gravity_station'|'ert_pseudosection'|'mt_edi'|'las_curve'|... [NEEDS-02]
-  geometry_kind TEXT NOT NULL,        -- 'point'|'multipoint'|'line'|'profile'|'volume'
+  geometry_kind TEXT NOT NULL,        -- 'points'|'soundings'|'profile2d'|'traces'|'raster2d'|'wellcurve'|'tensor' (doc 02 §3)
+  primary_property TEXT,              -- main measured PropertyTypeKey (null for raw traces/tensors)
   geometry_wkb  BLOB,                 -- Engineering-frame geometry (small)
   values_uri    TEXT,                 -- array file if bulk (else inline)
   values_json   TEXT,                 -- inline values for small obs
   bbox_json     TEXT NOT NULL,
   acquired_at   INTEGER,              -- time of measurement (4D)
-  meta_json     TEXT,                 -- [NEEDS-02]
+  meta_json     TEXT,                 -- doc 02 methodData/acquisition blob
   created_at    INTEGER NOT NULL
 );
 
@@ -171,13 +206,13 @@ CREATE TABLE features (
   id            TEXT PRIMARY KEY,
   dataset_id    TEXT REFERENCES datasets(id) ON DELETE CASCADE,
   project_id    TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
-  feature_type  TEXT NOT NULL,        -- 'horizon'|'fault'|'unit_solid'|'well_path'|'fracture'|'microseismic' [NEEDS-02]
+  feature_type  TEXT NOT NULL,        -- 'surface'|'fault'|'unitSolid'|'wellPath'|'pointCloud'|'fractureNetwork'|'polyline' (doc 02 §5 featureKind)
   store_uri     TEXT,                 -- glTF/VTK mesh, GeoJSON, or LAZ (§4)
   store_format  TEXT NOT NULL,        -- 'gltf'|'vtk'|'geojson'|'laz'|'3dtiles'
   geometry_wkb  BLOB,                 -- simplified geom for picking/index (optional)
   bbox_json     TEXT NOT NULL,
   has_time      INTEGER NOT NULL DEFAULT 0,
-  props_json    TEXT,                 -- per-feature attributes [NEEDS-02]
+  props_json    TEXT,                 -- per-feature attributes (doc 02 §5 AttributeSpec + detail)
   created_at    INTEGER NOT NULL,
   updated_at    INTEGER NOT NULL
 );
@@ -188,7 +223,7 @@ CREATE TABLE features (
 CREATE TABLE provenance (
   id            TEXT PRIMARY KEY,
   project_id    TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
-  target_kind   TEXT NOT NULL,        -- 'dataset'|'property_model'|'feature'|'observation'
+  target_kind   TEXT NOT NULL,        -- 'dataset'|'propertyModel'|'feature'|'observation' (doc 02 §2 kinds)
   target_id     TEXT NOT NULL,
   process       TEXT NOT NULL,        -- 'ingest:ert-stg'|'fuse:resample'|'transform:rockphys'|...
   process_version TEXT,
@@ -223,7 +258,7 @@ CREATE TABLE layers (
   id            TEXT PRIMARY KEY,
   project_id    TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
   name          TEXT NOT NULL,
-  source_kind   TEXT NOT NULL,        -- 'property_model'|'feature'|'observation'|'fused'
+  source_kind   TEXT NOT NULL,        -- 'propertyModel'|'feature'|'observation'|'fusedModel' (doc 02 §2 kinds)
   source_id     TEXT NOT NULL,
   render_type   TEXT NOT NULL,        -- 'volume'|'slice'|'isosurface'|'mesh'|'points'|'tubes'
   visible       INTEGER NOT NULL DEFAULT 1,
@@ -273,7 +308,7 @@ CREATE VIRTUAL TABLE artifact_rtree USING rtree(
 );
 CREATE TABLE artifact_rtree_map (
   rowid INTEGER PRIMARY KEY,
-  kind  TEXT NOT NULL,   -- 'property_model'|'feature'|'observation'
+  kind  TEXT NOT NULL,   -- 'propertyModel'|'feature'|'observation' (doc 02 §2 kinds)
   id    TEXT NOT NULL
 );
 ```
@@ -298,7 +333,7 @@ nested under it, so it copies/zips/backs-up as one unit (local-first contract).
 │   ├── pm_<id>.zarr/              #   one zarr group per property model
 │   │   ├── zarr.json              #     v3 group metadata
 │   │   ├── 0/  1/  2/ ...         #     pyramid levels (§5); 0 = full res
-│   │   └── uncertainty/           #     optional sibling array [NEEDS-02]
+│   │   └── <property>_sigma/      #     co-registered 1σ sibling array (doc 02 §6)
 │   └── fused_<id>.zarr/           #   fused/derived volumes — SAME layout (§7)
 ├── grids/                         # 2D rasters → COG
 │   └── g_<id>.tif                 #   surface grids, anomaly maps, InSAR scenes
@@ -342,7 +377,7 @@ pm_<id>.zarr/                       # a zarr GROUP = one property model
     zarr.json                       #   array meta: shape, chunks, dtype, codecs
     c/0/0/0   c/0/0/1   ...         #   chunk objects (one file per chunk)
   1/  2/  ...                       # coarser pyramid levels (§5)
-  uncertainty/                      # optional parallel multiscale array [NEEDS-02]
+  <property>_sigma/                 # co-registered 1σ multiscale array, variance-correct downsample (doc 02 §6, §10.3)
 ```
 
 - **Axis order:** `[z, y, x]` (3D) or `[t, z, y, x]` (4D), C-order, matching the
@@ -440,15 +475,15 @@ A fused or transform-derived volume (`OVERVIEW.md` §6 L1–L3; resample-to-fuse
 rock-physics outputs, favorability, uncertainty) is written as a **`fused_<id>.zarr`
 group with the identical layout** (§4–5): same chunking, compression, pyramids,
 multiscale metadata. It gets:
-- a `datasets` row with `kind='fused'`,
+- a `datasets` row with `kind='fusedModel'` (doc 02 §2; a project may hold several),
 - a `property_models` row (it *is* a property model in catalog terms),
 - a `provenance` record linking it to its input artifacts (the fusion DAG),
 - pyramids built by the same `pyramid` job.
 
 **Consequence:** the **same `/bricks`, `/slice`, `/sample`, `/isosurface`
-endpoints serve fused volumes** with zero special-casing. The fused grid (the
-canonical model grid, `OVERVIEW.md` §2 / `FusedGrid` **[NEEDS-02]**) is just
-another Zarr volume to storage & serving.
+endpoints serve fused volumes** with zero special-casing. The `FusedEarthModel`
+(doc 02 §11: regular-voxel grid, native models resampled in as referenced layers;
+a project may hold more than one) is just another Zarr volume to storage & serving.
 
 ---
 
@@ -577,8 +612,11 @@ SampleRequest {
 SampleResponse {
   "property": "resistivity", "unit": "ohm.m",
   "values": [12.3, 14.1, ...],        // null where outside volume
+  "sigma":  [2.1, 2.4, ...] | null,   // co-registered 1σ (doc 02 §6) when requested & available
   "positions": [[x,y,z], ...]         // echoes (esp. for line mode)
 }
+// SampleRequest/MultiSampleRequest accept "withUncertainty": true to include sigma
+// (doc 09's well-planner needs value + uncertainty along the trajectory).
 
 // ── MultiSampleRequest ── sample SEVERAL volumes at shared points → cross-plot (L2)
 MultiSampleRequest {
@@ -586,7 +624,7 @@ MultiSampleRequest {
   "mode": "points"|"line", "points":[...] | "line":{...},
   "level": 0, "t": 0, "interp": "trilinear"
 }
-// → { "samples": [ {id, property, unit, values[]}, ... ], "positions":[...] }
+// → { "samples": [ {id, property, unit, values[], sigma?[]}, ... ], "positions":[...] }
 
 // ── IsoRequest ── marching-cubes surface (OVERVIEW §7)
 IsoRequest {
@@ -643,9 +681,10 @@ change, not a format change.
 
 ## Decisions locked in
 
-1. **Catalog DB = SQLite + SpatiaLite** (one file per project), accessed via
-   SQLAlchemy with a backend-portable spatial helper; **PostgreSQL + PostGIS** is
-   the drop-in hosted upgrade. No engine-specific SQL in hot paths.
+1. **Catalog DB = PostgreSQL + PostGIS from the start** *(user decision)*, accessed
+   via SQLAlchemy with a backend-portable spatial helper; **SQLite + SpatiaLite**
+   remains the optional lightweight fallback. No engine-specific SQL in hot paths,
+   so either engine runs the same code.
 2. **A project is a self-contained directory** (`catalog.sqlite` + `arrays/`,
    `grids/`, `meshes/`, `vectors/`, `points/`, `raw/`, `cache/`) — copyable as one
    unit.
@@ -667,30 +706,30 @@ change, not a format change.
 8. **REST + HTTP-range / Zarr-over-HTTP for all data** (bricks/slices/samples/
    queries — cacheable, parallel, CDN-able); **WebSocket only for job
    progress/cancel.**
-9. **Sync-first jobs:** inline for fast ops; **FastAPI BackgroundTasks + a `jobs`
-   table** as the default async tier; **RQ** (over Celery) as the growth executor —
-   same job contract throughout.
+9. **Jobs:** inline for fast ops; **RQ + Redis workers from the start** *(user
+   decision)* as the async tier (crash-isolation + parallel ingest), against the
+   `jobs` table; FastAPI BackgroundTasks remains the documented lightweight
+   fallback. Same job contract (table + endpoints + WS) throughout.
 10. **`cache/` is fully derivable & deletable;** served chunks are **immutable +
     content-ETagged** (edits create new artifact ids), enabling aggressive HTTP
     caching and a clean S3+CDN path.
 
-### Open questions for you
+### Resolved (was: open questions)
 
-See **QUESTIONS FOR USER** (returned alongside this doc) for the highest-leverage
-forks. Secondary items parked here:
+- **Catalog DB** → PostgreSQL + PostGIS *(user decision)*.
+- **Async executor** → RQ + Redis from the start *(user decision)*.
+- **Slice colour-mapping locus** → **raw-f32 to client** is the default (GPU transfer
+  function, consistent with volume rendering); PNG is an export/thumbnail option.
+- **Artifact versioning depth** → **keep all versions** *(user decision)*; cheap via
+  content-addressed bulk sharing (doc 02 §9).
+- **`[NEEDS-02]` confirmations** → all resolved against doc 02 (see the
+  *Reconciliation with doc 02* banner above): `support`∈volume/grid2d/mesh;
+  uncertainty = `<property>_sigma` sibling; `geometryKind`/`featureKind`
+  vocabularies; `FusedEarthModel` = regular voxel, **multiple permitted per project**.
 
-- **Sparse octree vs dense pyramid timing** — dense pyramids ship in MVP; do we
-  expect volumes large/sparse enough (e.g. continental AEM, big seismic cubes) to
-  need sparse-brick skipping in an early phase, or is that safely Phase 4+?
-- **Artifact versioning depth** — edits create new ids (immutability). Do we keep
-  full version history (undo/branching) or just latest + provenance? Affects DB
-  growth.
-- **Slice colour-mapping locus** — server-side PNG slices (simple, cached) vs
-  always raw-f32 to the client with GPU transfer functions (consistent with volume
-  TF, more client work). Likely both; which is the default for the section/fence
-  panels?
-- **[NEEDS-02 confirmations]:** exact `support` enum + uncertainty-array
-  convention for `PropertyModel`; `obs_type`/`feature_type` vocabularies;
-  `FusedGrid` identity (is it 1 canonical grid per project, or many?). Storage is
-  ready for any of these; just needs the doc-02 names pinned.
+### Still open (genuinely deferred, non-blocking)
+
+- **Sparse octree vs dense pyramid timing** — dense pyramids ship in MVP; revisit
+  sparse-brick skipping only if continental-AEM / large seismic cubes demand it
+  (likely Phase 4+).
 ```

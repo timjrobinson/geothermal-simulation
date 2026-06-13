@@ -17,6 +17,17 @@
 > Where a parallel doc owns an interface, this doc **references it, states the
 > assumption it needs, and flags the need** rather than re-specifying it.
 
+> ### ⚠️ Revision — user decisions applied (see `DECISIONS.md`)
+> - **Trajectory fidelity:** geometric (min-curvature + DLS) **plus a crude
+>   drillability flag in core** — a lightweight build-rate / DLS-vs-feasibility
+>   sanity check that warns on likely-undrillable geometry. Full torque-and-drag /
+>   hydraulics / BHA mechanics remain a later `TrajectoryPlugin`.
+> - **Exports:** **CSV deviation survey + CSV predicted log + WITSML-trajectory**
+>   are the supported set (WITSML promoted into scope; Compass `.dev`/named-tool
+>   still deferred until a specific downstream tool is in the loop).
+> - **Induced-seismicity risk:** stays a later `RiskPlugin`; the core risk score
+>   remains the simple transparent weighted form — confirmed.
+
 ---
 
 ## 1. Scope & non-goals

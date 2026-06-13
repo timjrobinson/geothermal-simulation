@@ -188,7 +188,10 @@ A standalone module that:
 
 ## 10. Detailed design docs (one per section)
 
-Each becomes its own document in this folder before any code is written:
+**Status:** all ten section docs below are **drafted**, and every cross-cutting
+design fork has been resolved with the user. See **`DECISIONS.md`** for the
+authoritative decision log (the single source of truth; deviations from drafted
+defaults are marked there and applied as revision banners in the affected docs).
 
 | # | Doc | Scope |
 |---|---|---|

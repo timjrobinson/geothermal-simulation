@@ -17,6 +17,19 @@
 > mechanism from doc 08. Where those schemas are needed, names from OVERVIEW §2/§6 are
 > used as the contract and assumptions are flagged explicitly.
 
+> ### ⚠️ Revision — user decisions applied (see `DECISIONS.md`)
+> - **Starter rock-physics library = the FULL table** (not the minimal
+>   resistivity→temp + velocity→porosity set): resistivity→temperature/fluid
+>   (Archie + Arps), velocity→porosity, clay/alteration index, microseismic→fracture
+>   density, **Waxman-Smits / dual-water**, and **permeability proxies**. This expands
+>   Phase-3 scope and requires the synthetic earth (doc 05) to emit the supporting
+>   property/state fields these transforms consume.
+> - **Favorability combination = ship weighted-linear AND fuzzy-logic; defer Bayesian**
+>   until known-occurrence training data exists. (Drafted default was weighted-linear
+>   only by default.)
+> - **Uncertainty = delta-method everywhere, Monte-Carlo opt-in** per nonlinear
+>   transform — confirmed.
+
 ---
 
 ## 0. Where this sits in the stack
@@ -59,10 +72,10 @@ FusedGrid {
 }
 ```
 
-**Assumptions flagged for doc 02:**
-- **A1.** The fused grid is a **regular voxel grid** for the MVP. Octree/unstructured fusion is a later extension; the resampling API (§2.4) is written so it does not assume regularity, but only the regular path ships first.
-- **A2.** The fused grid is **project-owned and singular by default** (`fused-default`), bounded by `SpatialFrame.roi` × `SpatialFrame.depthRange` (doc 01 §2). Multiple named fused grids (e.g. a coarse overview + a zoomed target-zone grid) are permitted; each is a distinct `FusedGrid` id. Derived volumes carry `fusedGridId`.
-- **A3.** A derived volume **is a `PropertyModel`** (doc 02) whose `support` is exactly a `FusedGrid` and which carries provenance pointing at its inputs + transform (see §4.3). Doc 02 owns the `PropertyModel` schema; doc 04 owns its Zarr layout.
+**Reconciled with doc 02 (§11 `FusedEarthModel`) — now confirmed, not assumed:**
+- **A1 ✓ confirmed.** The fused grid **is a regular voxel grid** (doc 02 §11 default `gridType:"regular_voxel"`). Octree/unstructured fusion is a later extension delivered via the LOD pyramid, not an irregular topology; the resampling API (§2.4) doesn't assume regularity but only the regular path ships first.
+- **A2 ✓ confirmed (naming aligned).** The canonical object is doc 02's **`FusedEarthModel`** (id prefix `fem_`), bounded by `SpatialFrame.roi` × `depthRange`. A project **may hold several** (coarse overview + zoomed target-zone), each its own `fusedModel` Dataset — *not* forced-singular. The `FusedGrid` sketch above is illustrative; the authoritative shape is `FusedEarthModel.support` (a doc 02 `VolumeSupport`), so use doc 02's field names and **axis order `shape:[nz,ny,nx]`, origin/spacing `[…z,y,x]`** (z-leading, Z-up) — not the `[nx,ny,nz]` ordering sketched here.
+- **A3 ✓ confirmed.** A derived/fused volume **is a `PropertyModel`** (doc 02 §4) on the fused-grid `VolumeSupport`, carrying provenance to its inputs + transform (§4.3). Each native property enters as a `FusedLayer` referencing `sourcePropertyModelId@sourceVersion` (doc 02 §11) — originals stay read-only.
 
 ### 1.1 Choosing fused-grid resolution
 
@@ -367,7 +380,7 @@ Each native `PropertyModel` **carries an uncertainty representation** — doc 02
 | global σ or relative error | `σ` | fallback when nothing per-cell exists |
 | coverage/DOI mask | — | binary support (§2.3) |
 
-**Assumption A4 (doc 02):** a property model exposes at least a coverage mask and either a σ volume, a confidence volume, or a scalar relative error. If only a mask exists, we attach a **default conservative relative σ per property** (from the property registry) so propagation still runs.
+**A4 ✓ confirmed against doc 02 §6.** A `PropertyModel` exposes `uncertainty` as a co-registered **per-cell 1σ array** (`<property>_sigma`, canonical unit) and optionally a `ResolutionSpec` (DOI surface + smoothing kernel) — the "noisy vs blurry" complement. `uncertainty:null` means **unknown, not zero**, so we attach a **default conservative relative σ per property** (from the property registry) to keep propagation running. Fused layers also carry a `validMask` (doc 02 §11 `FusedLayer.validMask`) for coverage. (The `confidence`/`variance` forms in the table are alternate `UncertaintySpec.representation` values doc 02 §6 permits.)
 
 ### 5.2 Propagation rules
 

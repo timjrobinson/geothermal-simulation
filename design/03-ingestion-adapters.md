@@ -247,10 +247,12 @@ No core, storage, viewer, or transform code changes — that's the contract OVER
 
 ---
 
-## Dependencies / asks on doc 02 (data model)
+## Dependencies on doc 02 (data model) — RESOLVED ✓
 
-These names/shapes are **assumed** here and owned there — flagging to avoid divergence:
-- Exact fields of `Observation` / `PropertyModel` / `GeologicalFeature`, the **support-geometry enum** (point / line / section / well_path / grid2d / grid3d / mesh / point_cloud), and the **uncertainty** representation.
-- **Time-axis encoding** for 4D primitives (absolute UTC vs project-epoch offset).
-- **`Provenance` schema** (this doc populates raw-hash, adapter version, source CRS/units, normalization params).
-- **Primitive versioning / supersede semantics** for re-ingest with changed parameters.
+Doc 02 is final; the names this doc assumed now bind to it:
+- **Primitives:** adapters emit `ObservationSet` / `PropertyModel` / `GeologicalFeature` (doc 02 §3–5). The pre-normalization `Raw*` twins map onto these.
+- **Support / geometry vocabulary:** observations classify by **`geometryKind`** ∈ `points | soundings | profile2d | traces | raster2d | wellcurve | tensor` (doc 02 §3); property-model **`support.kind`** ∈ `volume | grid2d | mesh` (doc 02 §4). Use these exact tokens — the earlier ad-hoc list (point/line/section/…) is superseded.
+- **Uncertainty:** co-registered per-cell **1σ** array `<property>_sigma` (+ optional DOI/kernel), doc 02 §6. Adapters that ingest already-inverted models pass σ through when present.
+- **Time-axis encoding:** `TimeAxis` at the Dataset level, **leading `t` axis**, **explicit ISO-8601 UTC epochs** (doc 02 §1, §8) — not project-epoch offsets.
+- **Provenance:** this doc populates the doc 02 §7 `Provenance` DAG — `SourceFile` (raw sha256, format, originalCrs/Unit), `Step` (op/params/code), and **reversible `Transform`** records for every CRS/unit/datum change.
+- **Versioning / re-ingest:** doc 02 §9 — observations **immutable**; a corrected re-import is a *new* dataset with provenance linking to the prior (not an in-place supersede).
