@@ -3,8 +3,11 @@
 # Installs Claude Code and any project dependencies that already exist.
 set -euo pipefail
 
+# Use the native installer (installs to ~/.local/bin/claude). The host's mounted
+# ~/.claude.json records "installMethod": "native", so Claude Code expects the
+# binary there — an npm -g install lands elsewhere and triggers a repair error.
 echo "==> Installing Claude Code CLI..."
-npm install -g @anthropic-ai/claude-code
+curl -fsSL https://claude.ai/install.sh | bash
 
 # Backend deps — only if the project has been scaffolded yet (greenfield-safe).
 if [ -f backend/pyproject.toml ]; then
