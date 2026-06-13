@@ -43,8 +43,19 @@ fusion = [
 postgres = [
     "psycopg[binary]>=3.1",
 ]
+forward-t1 = [
+    # rigorous (T1) synthetic forward solvers (doc 05 §6, M3)
+    "harmonica>=0.7",      # gravity/magnetics Newtonian forward
+    "empymod>=2.3",        # 1D EM/MT forward
+    "pykonal>=0.4",        # eikonal seismic refraction traveltimes
+    "h5py>=3.10",          # pykonal dependency
+]
+geomodel = [
+    # implicit geological modelling (doc 07/OVERVIEW §6 L4, M8)
+    "gempy>=2024.1",
+]
 inversion = [
-    # installed in a separate worker/container venv in practice (doc 08/10)
+    # installed in a separate worker/container venv in practice (doc 08/10, M9)
     "simpeg>=0.22",
     "pygimli>=1.5",
 ]

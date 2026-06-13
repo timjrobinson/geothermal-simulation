@@ -43,9 +43,18 @@ from .base import (
 )
 from .borehole import HeatFlowForward, WellLogForward
 from .electrical import ERTForward, IPForward
-from .em_mt import MTForward, TDEMForward
-from .potential_field import GravityForward, MagneticsForward
-from .seismic import MicroseismicForward, SeismicReflectionForward
+from .em_mt import MTForward, MTRigorousForward, TDEMForward
+from .potential_field import (
+    GravityForward,
+    GravityRigorousForward,
+    MagneticsForward,
+)
+from .seismic import (
+    MicroseismicForward,
+    SeismicReflectionForward,
+    SeismicReflectionRigorousForward,
+    SeismicRefractionRigorousForward,
+)
 from .surface import GeologyMapForward, InSARForward
 
 __all__ = [
@@ -58,6 +67,11 @@ __all__ = [
     # per-method T0 forwards (doc 05 §4 table)
     "GravityForward",
     "MagneticsForward",
+    # per-method T1 rigorous forwards (doc 05 §4 rigorous column, §6 T1 tier)
+    "GravityRigorousForward",
+    "MTRigorousForward",
+    "SeismicReflectionRigorousForward",
+    "SeismicRefractionRigorousForward",
     "ERTForward",
     "IPForward",
     "TDEMForward",
@@ -70,6 +84,7 @@ __all__ = [
     "GeologyMapForward",
     # registry
     "FORWARD_MODELS",
+    "RIGOROUS_FORWARD_MODELS",
     "get_forward",
     "all_forwards",
 ]
@@ -93,21 +108,63 @@ def _build_registry() -> dict[tuple[str, str | None], T0Forward]:
     return {(m.method, m.submethod): m for m in models}
 
 
+def _build_rigorous_registry() -> dict[tuple[str, str | None], T0Forward]:
+    """T1 ("rigorous", doc 05 §6) forwards, keyed by ``(method, submethod)``.
+
+    Each entry overrides the T0 physics for the same method behind the identical
+    :class:`ForwardModel` contract and native file format (doc 05 §4 rigorous column);
+    methods without a rigorous tier yet simply fall back to T0 via :func:`get_forward`.
+    """
+    models: list[T0Forward] = [
+        GravityRigorousForward(),
+        MTRigorousForward(),
+        SeismicReflectionRigorousForward(),
+        SeismicRefractionRigorousForward(),
+    ]
+    return {(m.method, m.submethod): m for m in models}
+
+
 #: Canonical ``(method, submethod)`` → T0 forward instance (doc 02 §2 keys, doc 05 §4).
 FORWARD_MODELS: dict[tuple[str, str | None], T0Forward] = _build_registry()
 
+#: Canonical ``(method, submethod)`` → T1 rigorous forward instance (doc 05 §4, §6 T1).
+RIGOROUS_FORWARD_MODELS: dict[tuple[str, str | None], T0Forward] = (
+    _build_rigorous_registry()
+)
 
-def get_forward(method: str, submethod: str | None = None) -> T0Forward:
-    """Return the T0 forward for a canonical ``(method, submethod)`` pair (doc 05 §4)."""
+
+def get_forward(
+    method: str, submethod: str | None = None, fidelity: str = "plausible"
+) -> T0Forward:
+    """Return the forward for a canonical ``(method, submethod)`` pair (doc 05 §4).
+
+    ``fidelity`` selects the tier (doc 05 §6): ``"plausible"`` (T0, the default) or
+    ``"rigorous"`` (T1, the higher-fidelity physics behind the same contract). A request
+    for a rigorous forward that has no T1 variant raises ``KeyError`` (callers wanting a
+    silent T0 fallback should catch it and retry with ``fidelity="plausible"``).
+    """
+    if fidelity == "rigorous":
+        registry: dict[tuple[str, str | None], T0Forward] = RIGOROUS_FORWARD_MODELS
+        tier = "T1 rigorous"
+    elif fidelity == "plausible":
+        registry = FORWARD_MODELS
+        tier = "T0"
+    else:
+        raise KeyError(f"unknown fidelity {fidelity!r}; expected 'plausible'/'rigorous'")
     try:
-        return FORWARD_MODELS[(method, submethod)]
+        return registry[(method, submethod)]
     except KeyError as e:
         raise KeyError(
-            f"no T0 forward for ({method!r}, {submethod!r}); "
-            f"known: {sorted(FORWARD_MODELS)}"
+            f"no {tier} forward for ({method!r}, {submethod!r}); "
+            f"known: {sorted(registry)}"
         ) from e
 
 
 def all_forwards() -> list[T0Forward]:
-    """All registered T0 forward instances (doc 05 §6: T0 for every method)."""
+    """All registered T0 forward instances (doc 05 §6: T0 for every method).
+
+    The scenario builder runs exactly this set (one artifact per method); the rigorous
+    (T1) forwards are opt-in via :func:`get_forward` with ``fidelity="rigorous"`` and are
+    *not* included here, so the default round-trip pipeline is unchanged (doc 05 §6).
+    """
     return list(FORWARD_MODELS.values())

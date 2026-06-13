@@ -39,7 +39,12 @@ from .base import (
     world_axes,
 )
 
-__all__ = ["GravityForward", "MagneticsForward", "write_local_geotiff"]
+__all__ = [
+    "GravityForward",
+    "GravityRigorousForward",
+    "MagneticsForward",
+    "write_local_geotiff",
+]
 
 _G = 6.674e-11  # gravitational constant (m³ kg⁻¹ s⁻²)
 _MGAL = 1.0e5   # m/s² → mGal
@@ -77,8 +82,69 @@ def _station_grid(
     return xs, ys
 
 
+def _density_anomaly(truth: TruthEarth) -> np.ndarray:
+    """Density anomaly ``Δρ`` (kg/m³) vs. a depth-wise background (doc 05 §4 row 1).
+
+    The Bouguer source is the *excess* density relative to a laterally-averaged
+    background at each elevation (per-``z`` median), so a uniform layered earth produces
+    no anomaly and only the lateral mass contrasts (dense bodies, light alteration) show.
+    """
+    rho = truth.property_volume("density").astype(np.float64)
+    bg = np.nanmedian(rho, axis=(1, 2), keepdims=True)
+    return rho - bg
+
+
+def _obs_elevation(z: np.ndarray, dz: float) -> float:
+    """Observation surface just above the top of the model (doc 05 §4.3)."""
+    return float(np.max(z)) + max(dz, 1.0)
+
+
+def _emit_gravity(
+    fwd: T0Forward,
+    truth: TruthEarth,
+    acq: Acquisition,
+    grid: np.ndarray,
+    xs: np.ndarray,
+    ys: np.ndarray,
+    obs_elev: float,
+) -> list[Artifact]:
+    """Write the canonical gravity native files (CSV stations + Bouguer GeoTIFF).
+
+    Shared by the T0 and T1 forwards so ingestion is identical regardless of fidelity
+    (doc 05 §4 contract): ``gravity_stations.csv`` (``station,x,y,elev,bouguer_mgal``)
+    and ``gravity_bouguer.tif`` (single-band float32, Engineering local frame).
+    """
+    out_dir = Path(acq.params.get("out_dir", "."))
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    sxx, syy = np.meshgrid(xs, ys, indexing="xy")
+    df = pd.DataFrame({
+        "station": np.arange(grid.size),
+        "x": sxx.ravel(), "y": syy.ravel(), "elev": obs_elev,
+        "bouguer_mgal": grid.ravel(),
+    })
+    csv_path = out_dir / "gravity_stations.csv"
+    df.to_csv(csv_path, index=False)
+
+    tif_path = out_dir / "gravity_bouguer.tif"
+    write_local_geotiff(tif_path, grid, xs, ys)
+
+    prov = fwd._prov(truth, units="mGal", obsElev=obs_elev)
+    return [
+        Artifact(csv_path, "csv", fwd.method, fwd.submethod, prov),
+        Artifact(tif_path, "geotiff", fwd.method, fwd.submethod, prov),
+    ]
+
+
 class GravityForward(T0Forward):
-    """T0 gravity: analytic density-anomaly voxel sum → Bouguer grid (doc 05 §4 row 1)."""
+    """T0 gravity: analytic density-anomaly voxel sum → Bouguer grid (doc 05 §4 row 1).
+
+    The far-field point-mass kernel ``g = G·Δm·Δz / r³`` summed over voxels (doc 05 §6
+    T0 "degrade-the-truth") — fast and plausible, but the point-mass approximation
+    over-/under-shoots close to finite-extent cells. The rigorous tier
+    (:class:`GravityRigorousForward`) replaces this kernel with full Newtonian prism
+    integration (doc 05 §4 Gravity rigorous).
+    """
 
     method = "gravity"
     submethod = None
@@ -90,14 +156,11 @@ class GravityForward(T0Forward):
         dz, dy, dx = truth.spacing
         cell_vol = dz * dy * dx
 
-        rho = truth.property_volume("density").astype(np.float64)
-        # density anomaly relative to a depth-wise background (median per z-level)
-        bg = np.nanmedian(rho, axis=(1, 2), keepdims=True)
-        d_rho = rho - bg
+        d_rho = _density_anomaly(truth)
         dm = d_rho * cell_vol  # excess mass per voxel (kg)
 
         zz, yy, xx = np.meshgrid(z, y, x, indexing="ij")
-        obs_elev = float(np.max(z)) + max(dz, 1.0)  # just above the top of the model
+        obs_elev = _obs_elevation(z, dz)
 
         xs, ys = _station_grid(x, y, acq.gravity_spacing)
         gz = np.zeros((ys.size, xs.size), dtype=np.float64)
@@ -117,27 +180,84 @@ class GravityForward(T0Forward):
         # noise: 0.02-0.05 mGal Gaussian (doc 05 §4)
         noisy = add_gaussian_noise(gz_mgal, 0.03, rng)
 
-        out_dir = Path(acq.params.get("out_dir", "."))
-        out_dir.mkdir(parents=True, exist_ok=True)
+        return _emit_gravity(self, truth, acq, noisy, xs, ys, obs_elev)
 
-        # CSV stations
-        sxx, syy = np.meshgrid(xs, ys, indexing="xy")
-        df = pd.DataFrame({
-            "station": np.arange(noisy.size),
-            "x": sxx.ravel(), "y": syy.ravel(), "elev": obs_elev,
-            "bouguer_mgal": noisy.ravel(),
-        })
-        csv_path = out_dir / "gravity_stations.csv"
-        df.to_csv(csv_path, index=False)
 
-        tif_path = out_dir / "gravity_bouguer.tif"
-        write_local_geotiff(tif_path, noisy, xs, ys)
+class GravityRigorousForward(T0Forward):
+    """T1 gravity: full Newtonian prism integration via harmonica (doc 05 §4, §6 T1).
 
-        prov = self._prov(truth, units="mGal", obsElev=obs_elev)
-        return [
-            Artifact(csv_path, "csv", self.method, self.submethod, prov),
-            Artifact(tif_path, "geotiff", self.method, self.submethod, prov),
-        ]
+    The rigorous (``fidelity="rigorous"``) gravity forward replaces the T0 far-field
+    point-mass kernel with the exact closed-form gravitational attraction of each
+    right-rectangular density-anomaly voxel (harmonica :func:`prism_gravity`, the Nagy
+    1966/2000 prism formula). This is the doc 05 §4 note that "potential-field T1 is
+    cheap and high-value — the analytic prism sum is already close to rigorous": the
+    physics is identical in the far field but *exact* in the near field, where the T0
+    point mass mis-locates the cell's distributed mass.
+
+    Each truth voxel becomes a prism ``[west, east, south, north, bottom, top]`` (upward
+    positive, harmonica's Cartesian convention) carrying its density anomaly ``Δρ``
+    (kg/m³); ``prism_gravity(..., field="g_z")`` returns the **downward** acceleration in
+    mGal, so a dense body yields a positive Bouguer anomaly (right sign). The result is
+    still the deep/smooth/non-unique potential field (a mild resolution low-pass models
+    survey footprint averaging), then Gaussian station noise — emitting the SAME CSV
+    stations + Bouguer GeoTIFF as the T0 so ingestion is unchanged (doc 05 §4 contract).
+    """
+
+    method = "gravity"
+    submethod = None
+    fidelity = "rigorous"
+
+    def simulate(
+        self, truth: TruthEarth, acq: Acquisition, rng: np.random.Generator
+    ) -> list[Artifact]:
+        import harmonica as hm
+
+        z, y, x = world_axes(truth)
+        dz, dy, dx = truth.spacing
+        obs_elev = _obs_elevation(z, dz)
+
+        d_rho = _density_anomaly(truth)  # (nz, ny, nx)
+
+        # Build one right-rectangular prism per voxel, centred on the cell, in the
+        # Engineering frame mapped to harmonica's (easting=x, northing=y, upward=z).
+        zz, yy, xx = np.meshgrid(z, y, x, indexing="ij")
+        west = (xx - dx / 2.0).ravel()
+        east = (xx + dx / 2.0).ravel()
+        south = (yy - dy / 2.0).ravel()
+        north = (yy + dy / 2.0).ravel()
+        bottom = (zz - dz / 2.0).ravel()
+        top = (zz + dz / 2.0).ravel()
+        prisms = np.column_stack([west, east, south, north, bottom, top])
+        density = d_rho.ravel()
+
+        # Drop null prisms so the integration only spends effort on real mass contrasts.
+        nz_mask = np.abs(density) > 0.0
+        prisms = prisms[nz_mask]
+        density = density[nz_mask]
+
+        xs, ys = _station_grid(x, y, acq.gravity_spacing)
+        sxx, syy = np.meshgrid(xs, ys, indexing="xy")  # (ny_s, nx_s)
+        up = np.full(sxx.size, obs_elev, dtype=np.float64)
+
+        if density.size == 0:
+            gz_mgal = np.zeros((ys.size, xs.size), dtype=np.float64)
+        else:
+            # g_z is the DOWNWARD component (mGal) → +Δρ ⇒ +anomaly (harmonica convention).
+            gz = hm.prism_gravity(
+                (sxx.ravel(), syy.ravel(), up),
+                prisms,
+                density,
+                field="g_z",
+            )
+            gz_mgal = gz.reshape(sxx.shape)
+
+        # resolution: a mild survey-footprint low-pass (deg. 2); the prism field is
+        # already physically smooth, so this is lighter than the T0 point-mass blur.
+        gz_mgal = gaussian_lowpass(gz_mgal, sigma_cells=0.5)
+        # noise: 0.02-0.05 mGal Gaussian (doc 05 §4)
+        noisy = add_gaussian_noise(gz_mgal, 0.03, rng)
+
+        return _emit_gravity(self, truth, acq, noisy, xs, ys, obs_elev)
 
 
 class MagneticsForward(T0Forward):
