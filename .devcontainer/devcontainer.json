@@ -1,0 +1,55 @@
+{
+  "name": "Geothermal Simulator",
+  "dockerComposeFile": "docker-compose.yml",
+  "service": "app",
+  "workspaceFolder": "/workspaces/simulation",
+
+  // Toolchain layered on top of the Python base image (see Dockerfile).
+  "features": {
+    "ghcr.io/devcontainers/features/node:1": { "version": "20" },
+    "ghcr.io/devcontainers/features/github-cli:1": {}
+  },
+
+  // Ports the project's services run on (design docs 04/06).
+  //  - 5173 Vite (frontend), 8000 FastAPI (backend), 9181 RQ dashboard run in THIS container
+  //    and are forwarded here. 5432 (PostGIS) and 6379 (Redis) are published by their own
+  //    compose services (docker-compose.yml) and reachable on the same host ports.
+  "forwardPorts": [5173, 8000, 9181, 5432, 6379],
+  "portsAttributes": {
+    "5173": { "label": "Vite — frontend", "onAutoForward": "notify" },
+    "8000": { "label": "FastAPI — backend API", "onAutoForward": "notify" },
+    "9181": { "label": "RQ dashboard — jobs", "onAutoForward": "silent" },
+    "5432": { "label": "PostgreSQL + PostGIS", "onAutoForward": "silent" },
+    "6379": { "label": "Redis", "onAutoForward": "silent" }
+  },
+
+  "containerEnv": {
+    "DATABASE_URL": "postgresql+psycopg://geo:geo@db:5432/geothermal",
+    "REDIS_URL": "redis://redis:6379/0",
+    // Optional: passes a host-set API key through if you use one instead of an interactive login.
+    "ANTHROPIC_API_KEY": "${localEnv:ANTHROPIC_API_KEY}"
+  },
+
+  // Reuse your existing host Claude login + history inside the container.
+  // (Both paths exist on the host and uids match, so no re-auth needed.)
+  "mounts": [
+    "source=${localEnv:HOME}/.claude,target=/home/vscode/.claude,type=bind,consistency=cached",
+    "source=${localEnv:HOME}/.claude.json,target=/home/vscode/.claude.json,type=bind,consistency=cached"
+  ],
+
+  "postCreateCommand": "bash .devcontainer/post-create.sh",
+  "remoteUser": "vscode",
+
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "ms-python.python",
+        "ms-python.vscode-pylance",
+        "charliermarsh.ruff",
+        "dbaeumer.vscode-eslint",
+        "esbenp.prettier-vscode",
+        "ms-azuretools.vscode-docker"
+      ]
+    }
+  }
+}

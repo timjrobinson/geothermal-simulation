@@ -1,0 +1,71 @@
+# Dev stack for the geothermal simulator (design docs 04/05/06).
+#   app   — Python + Node + Claude Code; where you develop and run frontend/backend.
+#   db    — PostgreSQL + PostGIS (catalog DB, DECISIONS.md).
+#   redis — Redis backing RQ job workers (DECISIONS.md).
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    volumes:
+      # The project root (parent of .devcontainer) mounted into the container.
+      - ..:/workspaces/simulation:cached
+    command: sleep infinity
+    environment:
+      DATABASE_URL: postgresql+psycopg://geo:geo@db:5432/geothermal
+      REDIS_URL: redis://redis:6379/0
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  db:
+    image: postgis/postgis:16-3.4
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: geo
+      POSTGRES_PASSWORD: geo
+      POSTGRES_DB: geothermal
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U geo -d geothermal"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes"]
+    ports:
+      - "6379:6379"
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # Object store for the hosted phase (Zarr/COG are object-native, doc 04 §10).
+  # Uncomment when you want an S3-compatible store locally; ports 9000/9001.
+  # minio:
+  #   image: minio/minio
+  #   command: server /data --console-address ":9001"
+  #   environment:
+  #     MINIO_ROOT_USER: geo
+  #     MINIO_ROOT_PASSWORD: geo-secret
+  #   ports:
+  #     - "9000:9000"
+  #     - "9001:9001"
+  #   volumes:
+  #     - miniodata:/data
+
+volumes:
+  pgdata:
+  redisdata:
+  # miniodata:
