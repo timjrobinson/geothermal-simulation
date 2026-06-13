@@ -28,8 +28,8 @@
 >   until known-occurrence training data exists. (Drafted default was weighted-linear
 >   only by default.) **The shipped *default* is now fuzzy-conjunction** (heat ∧ fluid ∧
 >   permeability), with weighted-linear demoted to an explicit *exploratory* mode — this
->   default change was raised by the code-review critique (#11) and is **flagged for user
->   confirmation**.
+>   default change was raised by the code-review critique (#11) and is **confirmed by the
+>   user** (2026-06-14).
 > - **Uncertainty = delta-method everywhere, Monte-Carlo opt-in** per nonlinear
 >   transform — confirmed.
 > - **Rock-physics transforms are calibration-aware** (critique #10/#14): every transform
@@ -370,8 +370,9 @@ The shipped default is therefore **fuzzy-AND over the *required* evidence** (no 
 without a fluid path). **Weighted-linear is retained as an explicit *exploratory* mode**, not the
 default. Both still ship (per the decision); only the default changed.
 
-> **Flagged for user confirmation:** making fuzzy-conjunction (not weighted-linear) the default
-> was raised by the code-review critique (#11), beyond the original decision text — please confirm.
+> **Confirmed (2026-06-14):** making fuzzy-conjunction (not weighted-linear) the default
+> was raised by the code-review critique (#11), beyond the original decision text, and the
+> user signed off on it.
 
 **Three pluggable combination methods** (user-selectable — this is the R&D knob):
 
@@ -606,7 +607,7 @@ Ties to OVERVIEW §8 (synthetic earth has a "hot, conductive, altered zone") and
 3. **Resampling method is support- and property-driven.** Trilinear (regular), block-mean (downsampling), barycentric (mesh), spline gridding (scattered); interpolate in **log space for orders-of-magnitude properties** (resistivity/conductivity/permeability) per the property registry. Categorical = nearest only.
 4. **Transform = declarative spec + pure Python `apply()`**, with typed inputs/outputs (unit-checked via `pint`), tunable params, and **semver versioning**; the registration mechanism is doc 08's, the contract is here.
 5. **Derived volumes are first-class `PropertyModel`s** — stored, served (doc 04), and rendered (doc 06) identically to ingested ones; they differ only by a provenance recipe and can be chained.
-6. **Favorability is a configurable multi-evidence index in `[0,1]`** with swappable combination methods — **fuzzy-conjunction default** (heat ∧ fluid ∧ permeability, non-compensatory), **weighted-linear as an explicit exploratory mode**, Bayesian/weights-of-evidence deferred — per-evidence user-editable membership curves and weights, plus **evidence-overlap and assumption-burden** honesty indicators. An explicit R&D instrument. *(Fuzzy-as-default raised by critique #11; flagged for user confirmation.)*
+6. **Favorability is a configurable multi-evidence index in `[0,1]`** with swappable combination methods — **fuzzy-conjunction default** (heat ∧ fluid ∧ permeability, non-compensatory), **weighted-linear as an explicit exploratory mode**, Bayesian/weights-of-evidence deferred — per-evidence user-editable membership curves and weights, plus **evidence-overlap and assumption-burden** honesty indicators. An explicit R&D instrument. *(Fuzzy-as-default raised by critique #11; confirmed by user 2026-06-14.)*
 7. **Uncertainty propagates end-to-end.** σ rides through resampling (with interpolation-variance inflation) and transforms (delta method default, optional Monte-Carlo); every derived/resampled layer ships a **paired confidence volume** that can modulate render opacity. Below-DOI / low-sensitivity / extrapolated-detail regions are **flagged**, never silently trusted.
 8. **All fusion compute is Python backend** (`xarray`/`numpy`/`scipy`/`verde`/`scikit-learn`/`pint`); **sync for selections ≤ 5 M cells, job-based for whole-grid** work (job API = doc 04). The browser only renders.
 9. **Rock-physics transforms are calibration-aware (scientific-honesty gate).** Every transform declares `assumptions` + `calibrationStatus ∈ uncalibrated|well_calibrated|lab_calibrated`. **Uncalibrated outputs are likelihood/proxy fields** (`UncertaintySpec.tier:"proxy"`), retitled "… likelihood," never deterministic measurements. **Well-log / core / geochem calibration (§4.8) is the centre of the workflow** — ingest probes → fit site-specific parameter *distributions* → re-run → promote status/tier, and only locally where probes constrain it. Synthetic data has truth fields for scoring; real projects do not.
@@ -616,5 +617,5 @@ Ties to OVERVIEW §8 (synthetic earth has a "hot, conductive, altered zone") and
 These three forks are **decided** and stated above; recorded here for traceability (no longer open).
 
 1. **Rock-physics starter library = the FULL §4.2 table** (resistivity→temp/fluid Archie+Arps, velocity→porosity, alteration index, microseismic→fracture density, Waxman-Smits/dual-water, permeability proxies). Sets Phase-3 scope; the synthetic earth (doc 05) must forward-model the supporting fields. *(Drafted default was the minimal resistivity→temp + velocity→porosity set.)*
-2. **Favorability ships weighted-linear AND fuzzy-logic; Bayesian deferred** until known-occurrence training data exists. **The default is fuzzy-conjunction** (heat ∧ fluid ∧ permeability, non-compensatory); weighted-linear is an explicit exploratory mode with a missing-required-evidence guard (§4.6). *(Fuzzy-as-default was raised by critique #11 and is flagged for user confirmation.)*
+2. **Favorability ships weighted-linear AND fuzzy-logic; Bayesian deferred** until known-occurrence training data exists. **The default is fuzzy-conjunction** (heat ∧ fluid ∧ permeability, non-compensatory); weighted-linear is an explicit exploratory mode with a missing-required-evidence guard (§4.6). *(Fuzzy-as-default was raised by critique #11 and confirmed by the user 2026-06-14.)*
 3. **Uncertainty = delta-method everywhere, Monte-Carlo opt-in** per nonlinear transform (Archie is the canonical nonlinear case). Delta-method assumes input independence (doc 02 §6 `independence`); proxy/qualitative-tier inputs collapse confidence display to low/med/high (§5.1).

@@ -18,7 +18,7 @@ drove this pass.
 | 8 | Provenance over-promising reversibility | Scoped reversibility: `Transform` (`exact`/`with_pinned_deps`) vs `Step` derivations (repeatable-not-reversible) in doc 02 §7 + doc 01 §7. |
 | 9 | Local→georef "too clean" | Added **`georefStatus`** (unknown→survey_controlled) in doc 01 §2; clarified "zero reprocessing" = bytes, not physical validity. |
 | 10/14 | Rock-physics false precision / calibration | Transforms now declare `assumptions` + `calibrationStatus`; **uncalibrated outputs are labelled likelihood/proxy**; added a central **well-log calibration workflow** (doc 07 §4.8). |
-| 11 | Compensatory favorability | **Fuzzy-conjunction is now the default play score** (heat ∧ fluid ∧ permeability); weighted-linear demoted to exploratory. Added evidence-overlap + assumption-burden indicators. *(Flagged for your confirmation — see below.)* |
+| 11 | Compensatory favorability | **Fuzzy-conjunction is now the default play score** (heat ∧ fluid ∧ permeability); weighted-linear demoted to exploratory. Added evidence-overlap + assumption-burden indicators. *(Confirmed by user 2026-06-14.)* |
 | 12 | Uncertainty too narrow | Added `UncertaintySpec.tier` (quantitative/proxy/qualitative/unknown) + `independence` flag (doc 02 §6); doc 07 shows qualitative confidence for proxy inputs and routes resolving-power through DOI not σ. |
 | 15 | Plugin trust vs inversion isolation | Added **`executionMode`** (in_process/worker_process/container/remote_worker) in doc 08; doc 10 references it — the two now agree (trust axis ≠ isolation axis). |
 | 16 | Frontend plugin half-enabled | Deleted dynamic third-party ES-module loading; fixed client renderer catalog via `/api/capabilities` (doc 08 §7.2). |
@@ -49,15 +49,15 @@ we **kept the decision and sequenced it** instead of deleting it:
   not the critique's.
 - **#11 default favorability** — we changed the *default* to fuzzy-conjunction (a scientific
   correctness improvement within your "ship both" decision), but **both methods still ship**.
-  This one default change is **flagged for your confirmation** (see below).
+  **Confirmed by the user (2026-06-14).**
 
-## Needs your confirmation
+## Confirmed
 
 1. **Favorability default = fuzzy-conjunction** (heat ∧ fluid ∧ permeability), with
-   weighted-linear as an exploratory mode. You chose "ship both, defer Bayesian"; the
-   *default within that* wasn't pinned. The critique (#11) makes a strong geothermal case
-   for fuzzy-AND as default (linear lets high temperature mask absent permeability). Applied,
-   but say the word if you'd rather default to weighted-linear.
+   weighted-linear as an exploratory mode — **confirmed 2026-06-14**. You chose "ship both,
+   defer Bayesian"; the *default within that* wasn't pinned. The critique (#11) made the
+   geothermal case for fuzzy-AND (linear lets high temperature mask absent permeability),
+   and you signed off.
 
 ## Not done (intentionally deferred, low value now)
 

@@ -48,7 +48,7 @@ differs from the doc's originally-drafted default (those docs were patched to ma
 
 ## Fusion & rock-physics (doc 07)
 - Starter rock-physics library: **full table** (resistivity→temp/fluid, velocity→porosity, alteration index, microseismic→fracture density, Waxman-Smits/dual-water, permeability proxies). **[DEVIATION — drafted default was the minimal resistivity→temp + velocity→porosity set]**
-- Favorability combination: **weighted-linear + fuzzy-logic shipped; Bayesian deferred** until known-occurrence training data. **[DEVIATION — drafted default was weighted-linear only by default]**
+- Favorability combination: **weighted-linear + fuzzy-logic shipped; Bayesian deferred** until known-occurrence training data. **Default = fuzzy-conjunction** (heat ∧ fluid ∧ permeability, non-compensatory); weighted-linear is an explicit exploratory mode. **[DEVIATION — drafted default was weighted-linear; fuzzy-default raised by critique #11, confirmed by user 2026-06-14]**
 - Uncertainty: **delta-method everywhere, Monte-Carlo opt-in** per nonlinear transform.
 - Non-destructive resampling; footprint honesty (NaN beyond coverage/DOI); derived volumes are PropertyModels.
 
