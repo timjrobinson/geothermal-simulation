@@ -1,0 +1,33 @@
+# Local infra for the catalog DB (Postgres + PostGIS) and job queue (Redis).
+# doc 04 §2.1 (PostgreSQL + PostGIS from the start) and §9.4 (RQ + Redis).
+# When Docker is unavailable, the backend falls back to SQLite + SpatiaLite (catalog)
+# and FastAPI BackgroundTasks (jobs) behind the same contracts.
+services:
+  postgres:
+    image: postgis/postgis:16-3.4
+    environment:
+      POSTGRES_USER: geosim
+      POSTGRES_PASSWORD: geosim
+      POSTGRES_DB: geosim
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U geosim"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  pgdata:
