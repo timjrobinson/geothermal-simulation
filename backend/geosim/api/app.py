@@ -47,6 +47,7 @@ from geosim.storage import ensure_project_layout
 from .features import build_feature_router
 from .frame_io import frame_from_dict, frame_from_row, frame_row_kwargs, frame_to_dict
 from .fusion import build_fusion_router
+from .planning import build_planning_router
 from .property_models import build_property_model_router
 from .schemas import (
     DemoJobRequest,
@@ -226,6 +227,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # lines), microseismic time-filtered point clouds, well trajectories, and the global
     # time-extent union (doc 04 §9.2, doc 02 §5/§8, doc 06 §5.3/§5.4/§9.4).
     app.include_router(build_feature_router(session_dep))
+
+    # Well-planning surface: targets (enriched), planned wells (intent|survey), solve, positions
+    # (+ drillability), predict (predicted log + geothermal summary + risk). Shares the same
+    # catalog session + storage_root DI off app.state (doc 09 §10, doc 04 §9).
+    app.include_router(build_planning_router(session_dep))
 
     # ──────────────────────────────── capabilities (doc 08 §7.1) ────────────────────────────
     @app.get("/api/capabilities")

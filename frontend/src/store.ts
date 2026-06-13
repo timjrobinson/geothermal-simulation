@@ -50,6 +50,14 @@ import type { SurfaceGrid, XYExtent } from "./lib/terrain";
 import type { FusedModelOut, FusedSampleOut } from "./lib/fusion";
 import { selectionToVolume, type VoxelReadout } from "./lib/brushing";
 import type { WellReadout } from "./lib/wells";
+import {
+  type DesignParams,
+  type RiskWeights,
+  type PredictedLog,
+  defaultDesignParams,
+  defaultRiskWeights,
+} from "./lib/planning";
+import type { DrillTargetOut } from "./lib/planningApi";
 
 // Re-export so existing importers (and tests) keep resolving these from the store.
 export { tfFromMeta };
@@ -129,6 +137,31 @@ interface ViewerState extends LayerCollection {
   // when the pointer is off any well. Depths are TRUE (not vertically-exaggerated, doc 06 §2.3).
   wellReadout: WellHoverReadout | null;
 
+  // ── well-planning workflow (doc 09 §8) ────────────────────────────────────────────
+  // The planning panel drives a target-pick → design-solve → predict loop. `planningOpen`
+  // toggles the panel. `pickTargetMode` arms the 3D scene to convert the next pick into an
+  // Engineering XYZ → POST target. `planningProjectId`/`planningFusedModelId` scope the
+  // backend calls (a planning session is bound to one project + fused model). `planTarget`
+  // is the enriched DrillTarget (temperature/favorability/lithology readout). `designParams`
+  // is the live trajectory form. `activeWellId`/`activeLayerId` link the solved planned-well
+  // layer. `predictedLog` is the last POST predict response (drives tracks + tube colours +
+  // outputs). `scenarios` accumulates named alternatives for the comparison table. The risk
+  // weights are the §7.4 glass-box composite, editable in the panel.
+  planningOpen: boolean;
+  pickTargetMode: boolean;
+  // A transient picked Engineering XYZ from the 3D scene (PickTargetLayer) the panel consumes
+  // to POST a target. Cleared once the panel has handled it.
+  pendingPickXYZ: [number, number, number] | null;
+  planningProjectId: string | null;
+  planningFusedModelId: string | null;
+  planTarget: DrillTargetOut | null;
+  designParams: DesignParams;
+  riskWeights: RiskWeights;
+  activeWellId: string | null;
+  activeLayerId: string | null;
+  predictedLog: PredictedLog | null;
+  scenarios: PlanScenario[];
+
   // ── global 4-D time slider (doc 06 §9.4) ──────────────────────────────────────────
   // The time axis is the UNION of every time-bearing layer's epochs (microseismic, InSAR,
   // repeat surveys). The playhead is a single instant (ms); `timeWindowMode` expands it to
@@ -196,7 +229,7 @@ interface ViewerState extends LayerCollection {
   }) => string;
   addWellLayer: (
     trajectory: WellTrajectory,
-    opts?: { id?: string; name?: string; datasetId?: string; logProperty?: string | null; select?: boolean },
+    opts?: { id?: string; name?: string; datasetId?: string; logProperty?: string | null; dlsMax_deg30m?: number; select?: boolean },
   ) => string;
   addPointCloudLayer: (
     cloud: PointCloud,
@@ -241,6 +274,31 @@ interface ViewerState extends LayerCollection {
   clearSelection: () => void;
   setPickedVoxel: (v: VoxelReadout | null) => void;
   setWellReadout: (r: WellHoverReadout | null) => void;
+
+  // ── planning actions (doc 09 §8) ──────────────────────────────────────────────────
+  setPlanningOpen: (b: boolean) => void;
+  setPickTargetMode: (b: boolean) => void;
+  setPendingPickXYZ: (xyz: [number, number, number] | null) => void;
+  setPlanningContext: (projectId: string | null, fusedModelId: string | null) => void;
+  setPlanTarget: (t: DrillTargetOut | null) => void;
+  setDesignParams: (patch: Partial<DesignParams>) => void;
+  setRiskWeights: (patch: Partial<RiskWeights>) => void;
+  setActiveWell: (wellId: string | null, layerId: string | null) => void;
+  setPredictedLog: (log: PredictedLog | null) => void;
+  // Snapshot the active well + its predicted log as a named comparison scenario (doc 09 §8.2).
+  saveScenario: (name: string, maxDLS_deg30m: number) => void;
+  removeScenario: (wellId: string) => void;
+}
+
+// A saved alternative-scenario snapshot for the comparison table (doc 09 §8.2). Holds the
+// metrics-bearing predicted log + the design params so a scenario can be reloaded/compared.
+export interface PlanScenario {
+  wellId: string;
+  layerId: string | null;
+  name: string;
+  design: DesignParams;
+  log: PredictedLog;
+  maxDLS_deg30m: number;
 }
 
 // Recompute the union AABB over all visible volume layers (doc 06 §2.2 framing basis).
@@ -333,6 +391,19 @@ export const useViewer = create<ViewerState>((set, get) => ({
   selection: [],
   pickedVoxel: null,
   wellReadout: null,
+
+  planningOpen: false,
+  pickTargetMode: false,
+  pendingPickXYZ: null,
+  planningProjectId: null,
+  planningFusedModelId: null,
+  planTarget: null,
+  designParams: defaultDesignParams(),
+  riskWeights: defaultRiskWeights(),
+  activeWellId: null,
+  activeLayerId: null,
+  predictedLog: null,
+  scenarios: [],
 
   setLoading: (loading) => set({ loading }),
   setError: (error) => set({ error }),
@@ -633,6 +704,39 @@ export const useViewer = create<ViewerState>((set, get) => ({
 
   setPickedVoxel: (pickedVoxel) => set({ pickedVoxel }),
   setWellReadout: (wellReadout) => set({ wellReadout }),
+
+  // ── planning actions (doc 09 §8) ──────────────────────────────────────────────────
+  setPlanningOpen: (planningOpen) => set({ planningOpen }),
+  setPickTargetMode: (pickTargetMode) => set({ pickTargetMode }),
+  setPendingPickXYZ: (pendingPickXYZ) => set({ pendingPickXYZ }),
+  setPlanningContext: (planningProjectId, planningFusedModelId) =>
+    set({ planningProjectId, planningFusedModelId }),
+  setPlanTarget: (planTarget) => set({ planTarget }),
+  setDesignParams: (patch) =>
+    set((s) => ({ designParams: { ...s.designParams, ...patch } })),
+  setRiskWeights: (patch) =>
+    set((s) => ({ riskWeights: { ...s.riskWeights, ...patch } })),
+  setActiveWell: (activeWellId, activeLayerId) => set({ activeWellId, activeLayerId }),
+  setPredictedLog: (predictedLog) => set({ predictedLog }),
+
+  saveScenario: (name, maxDLS_deg30m) => {
+    const { activeWellId, activeLayerId, designParams, predictedLog } = get();
+    if (!activeWellId || !predictedLog) return;
+    const scenario: PlanScenario = {
+      wellId: activeWellId,
+      layerId: activeLayerId,
+      name,
+      design: { ...designParams },
+      log: predictedLog,
+      maxDLS_deg30m,
+    };
+    // Replace an existing snapshot for the same well, else append.
+    const rest = get().scenarios.filter((sc) => sc.wellId !== activeWellId);
+    set({ scenarios: [...rest, scenario] });
+  },
+
+  removeScenario: (wellId) =>
+    set((s) => ({ scenarios: s.scenarios.filter((sc) => sc.wellId !== wellId) })),
 }));
 
 // Convenience selectors (avoid re-deriving in components).

@@ -21,6 +21,7 @@ import {
   readoutAtPoint,
   type Vec3,
 } from "../lib/wells";
+import { dlsRingColors } from "../lib/planning";
 import { clipPlanesFor } from "./clipPlanes";
 import type { AABB } from "../lib/volume";
 
@@ -61,6 +62,25 @@ export function WellLayer({ layer }: { layer: Layer }) {
   const vertexColors = useMemo(() => {
     if (!geometry || !traj) return null;
     const property = layer.logProperty;
+    // DLS constraint feedback (doc 09 §8.1): when no log curve is selected but a DLS ceiling
+    // is set on a planned well, paint per-segment — segments over the ceiling render red.
+    if ((!property || !traj.logs?.curves?.[property]) && layer.dlsMax_deg30m != null && traj.dls) {
+      const tubeSegs = (geometry.parameters as { tubularSegments: number }).tubularSegments;
+      const radial = (geometry.parameters as { radialSegments: number }).radialSegments;
+      const ringCount = tubeSegs + 1;
+      const perRing = radial + 1;
+      const ringRgb = dlsRingColors(traj.dls, layer.dlsMax_deg30m, ringCount);
+      const out = new Float32Array(ringCount * perRing * 3);
+      for (let r = 0; r < ringCount; r++) {
+        for (let k = 0; k < perRing; k++) {
+          const o = (r * perRing + k) * 3;
+          out[o] = ringRgb[r * 3];
+          out[o + 1] = ringRgb[r * 3 + 1];
+          out[o + 2] = ringRgb[r * 3 + 2];
+        }
+      }
+      return out;
+    }
     if (!property || !traj.logs?.curves?.[property]) return null;
     const md = stationMD(traj);
     const stationValues = resampleCurveToStations(traj.logs, property, md);
@@ -95,7 +115,7 @@ export function WellLayer({ layer }: { layer: Layer }) {
       for (let k = 0; k < perRing; k++) perVertex[r * perRing + k] = ringValues[r];
     }
     return curveToVertexColors(perVertex, range, layer.transferFn.colormap);
-  }, [geometry, traj, layer.logProperty, layer.transferFn.colormap]);
+  }, [geometry, traj, layer.logProperty, layer.transferFn.colormap, layer.dlsMax_deg30m]);
 
   // Attach / detach the colour attribute when it changes.
   useEffect(() => {

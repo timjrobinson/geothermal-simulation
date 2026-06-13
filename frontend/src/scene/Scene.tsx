@@ -17,6 +17,7 @@ import { FeatureLayers } from "./FeatureLayer";
 import { WellLayers } from "./WellLayer";
 import { PointCloudLayers } from "./PointCloudLayer";
 import { RasterLayers } from "./RasterLayer";
+import { PickTargetLayer } from "./PickTargetLayer";
 import { aabbCenter, aabbSize } from "../lib/volume";
 
 // One-time Z-up: ENU Z is up (doc 06 §2.1). Set before any Object3D is created.
@@ -84,6 +85,7 @@ export function Scene() {
       <FeatureLayers />
       <WellLayers />
       <PointCloudLayers />
+      <PickTargetLayer />
       <ClipBox />
 
       <axesHelper args={[1000]} />

@@ -98,6 +98,9 @@ export interface Layer {
   // the tube (null = a neutral solid tube).
   trajectory?: WellTrajectory;
   logProperty?: string | null; // selected LAS curve name (tube colour)
+  // Planned-well DLS ceiling (doc 09 §8.1): when set AND no log curve is selected, the tube
+  // paints per-segment — segments whose dogleg exceeds this render red (constraint feedback).
+  dlsMax_deg30m?: number;
 
   // `points` layers (microseismic 4-D cloud, doc 06 §5.4): the compact parallel arrays the
   // PointCloudLayer uploads once to a THREE.Points buffer; the time window culls on the GPU
@@ -309,7 +312,13 @@ export function makeFeatureLayer(opts: {
 // LAS curve that colours the tube (defaults to the joined logs' primary property).
 export function makeWellLayer(
   trajectory: WellTrajectory,
-  opts: { id?: string; name?: string; datasetId?: string; logProperty?: string | null } = {},
+  opts: {
+    id?: string;
+    name?: string;
+    datasetId?: string;
+    logProperty?: string | null;
+    dlsMax_deg30m?: number;
+  } = {},
 ): Layer {
   const aabb = polylineAABB(trajectory.polyline);
   const logProperty =
@@ -331,6 +340,7 @@ export function makeWellLayer(
     featureKind: "wellPath",
     trajectory,
     logProperty,
+    dlsMax_deg30m: opts.dlsMax_deg30m,
     aabb,
   };
 }

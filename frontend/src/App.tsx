@@ -20,6 +20,7 @@ import { AnalysisPanel } from "./ui/AnalysisPanel";
 import { FavorabilityPanel } from "./ui/FavorabilityPanel";
 import { TimeSlider } from "./ui/TimeSlider";
 import { LogTrackPanel } from "./ui/LogTrackPanel";
+import { PlanningPanel } from "./ui/PlanningPanel";
 
 export function App() {
   const loadData = useViewer((s) => s.loadData);
@@ -38,6 +39,8 @@ export function App() {
   const capabilities = useViewer((s) => s.capabilities);
   const analysisOpen = useViewer((s) => s.analysisOpen);
   const setAnalysisOpen = useViewer((s) => s.setAnalysisOpen);
+  const planningOpen = useViewer((s) => s.planningOpen);
+  const setPlanningOpen = useViewer((s) => s.setPlanningOpen);
 
   const [mode, setMode] = useState<string>("");
   const [favorabilityOpen, setFavorabilityOpen] = useState(false);
@@ -109,6 +112,31 @@ export function App() {
       <ControlPanel />
       <TimeSlider />
       <LogTrackPanel />
+      {planningOpen ? (
+        <PlanningPanel />
+      ) : (
+        <button
+          onClick={() => setPlanningOpen(true)}
+          style={{
+            position: "absolute",
+            top: 64,
+            left: 12,
+            zIndex: 11,
+            background: "#89b4fa",
+            color: "#11131c",
+            border: "1px solid #89b4fa",
+            borderRadius: 6,
+            padding: "6px 12px",
+            cursor: "pointer",
+            fontSize: 13,
+            fontWeight: 600,
+            fontFamily: "ui-sans-serif, system-ui, sans-serif",
+          }}
+          title="open the well-planning workflow (doc 09 §8)"
+        >
+          Plan well ▸
+        </button>
+      )}
       {analysisOpen ? (
         <AnalysisPanel />
       ) : (
