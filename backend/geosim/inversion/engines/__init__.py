@@ -8,12 +8,35 @@ on the process-wide :class:`~geosim.plugins.PluginRegistry` (doc 08 §4f) via th
 module-level :func:`~geosim.inversion.engine.register_inversion_engine` call, exactly like
 the in-framework :class:`~geosim.inversion.mock.MockLinearEngine`.
 
+This ``__init__`` **auto-imports every sibling module** (``pkgutil.iter_modules`` over the
+package dir) so importing :mod:`geosim.inversion.engines` is enough to register the whole
+palette — a new engine self-registers by simply *dropping a module in this package*, with
+**no shared-file edit** (the doc-10 §9 / doc-03 §9 "one file adds an engine" contract). This
+keeps parallel contributors decoupled: each lands an independent self-registering module.
+
+- :mod:`.gravity_simpeg` — :class:`SimpegGravityInversion`: SimPEG linear gravity → density
+  (doc 10 §8, §9), the plumbing-proof engine.
 - :mod:`.ert_pygimli` — :class:`PygimliERTInversion`: PyGIMLi ERT (dipole-dipole
   apparent-resistivity pseudosection → resistivity), the first geothermally-meaningful,
-  local-feasible engine (doc 10 §9). Heavy PyGIMLi imports live *inside* the module so
-  importing this package stays cheap when no ERT inversion is requested.
+  local-feasible engine (doc 10 §9). Heavy SimPEG/PyGIMLi imports live *inside* each module
+  so importing this package stays cheap when no inversion is requested.
 """
 
 from __future__ import annotations
 
+import importlib
+import pkgutil
+
 __all__: list[str] = []
+
+
+def _autoimport_siblings() -> None:
+    """Import every sibling engine module so its ``register_inversion_engine`` call runs."""
+    package = __name__
+    for mod in pkgutil.iter_modules(__path__):
+        if mod.name.startswith("_"):
+            continue
+        importlib.import_module(f"{package}.{mod.name}")
+
+
+_autoimport_siblings()

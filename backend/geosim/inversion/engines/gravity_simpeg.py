@@ -26,6 +26,19 @@ Design (doc 10 §8 "SimPEG gravity → TensorMesh, gravity.Survey → density"):
 
 ``executionMode`` declares ``worker_process`` (doc 08 §2.1): SimPEG sensitivity matrices
 are heavy enough to belong off the request thread.
+
+**GPU acceleration (doc 10 §8).** The dominant cost of a linear gravity inversion is the
+*dense* sensitivity matrix ``G`` (``n_data × n_active_cells``) and its repeated products
+``G·m`` (forward) / ``Gᵀ·r`` (adjoint) inside every Gauss-Newton/CG iteration. Those two
+``matmul``s are the cleanest GPU win, so the engine wraps SimPEG's
+``Simulation3DIntegral`` with a tiny subclass (:func:`_make_gpu_simulation`) that routes
+``G @ x`` and ``Gᵀ @ v`` through :mod:`geosim.compute`: ``G`` is staged on the active
+backend **once** (CuPy on an RTX-class GPU, NumPy on a CPU-only box) and the heavy matmul
+runs there, copying only the small result vector back to host for SciPy/discretize. The
+``rho``/``rhoDeriv`` algebra around the dense product is left untouched, so the NumPy path
+is **byte-identical** to stock SimPEG and the synthetic round-trip test still passes; the
+GPU path only changes *where* the dense matmul executes. A ``use_gpu`` param
+(``auto``/``on``/``off``) selects the backend.
 """
 
 from __future__ import annotations
@@ -34,6 +47,7 @@ from typing import TYPE_CHECKING, Any
 
 import numpy as np
 
+from geosim import compute
 from geosim.jobs import Cancelled
 
 from ..engine import (
@@ -82,6 +96,10 @@ GRAVITY_SIMPEG_SPEC = InversionEngineSpec(
             # Relative noise floor used to build the data standard deviation when stations
             # carry no σ (fraction of the max |anomaly|), doc 10 §3.
             "rel_noise": {"type": "number", "minimum": 0.0, "maximum": 1.0, "default": 0.02},
+            # GPU acceleration of the dense sensitivity (G·m / Gᵀ·r) products via
+            # geosim.compute (doc 10 §8). "auto" → CuPy when a CUDA device is present, else
+            # NumPy; "off" forces the host/NumPy path; "on" requires a GPU (errors if absent).
+            "use_gpu": {"type": "string", "enum": ["auto", "on", "off"], "default": "auto"},
         },
     },
 )
@@ -139,11 +157,19 @@ class SimpegGravityInversion:
         survey = gravity.survey.Survey(source_field)
 
         # 2) simulation on the active core+pad mesh; the model unknown is Δρ on active cells.
+        #    The dense-G products (G·m / Gᵀ·r) optionally run on the GPU via geosim.compute
+        #    (doc 10 §8); on a CPU-only box this is the identical stock NumPy path.
         mesh = domain.mesh
         active = np.asarray(domain.active_cells, dtype=bool)
         n_active = int(active.sum())
         rho_map = maps.IdentityMap(nP=n_active)
-        simulation = gravity.simulation.Simulation3DIntegral(
+        use_gpu = _resolve_use_gpu(str(params.get("use_gpu", "auto")))
+        sim_cls = (
+            _make_gpu_simulation(gravity)
+            if use_gpu
+            else gravity.simulation.Simulation3DIntegral
+        )
+        simulation = sim_cls(
             survey=survey,
             mesh=mesh,
             rhoMap=rho_map,
@@ -232,6 +258,9 @@ class SimpegGravityInversion:
                 "dRhoMin": float(np.nanmin(d_rho_core)),
                 "dRhoMax": float(np.nanmax(d_rho_core)),
                 "betaFinal": float(getattr(inv_prob, "beta", float("nan"))),
+                # GPU acceleration record (doc 10 §8): which dense-G backend actually ran.
+                "useGpu": bool(use_gpu),
+                "computeBackend": compute.backend_name() if use_gpu else "numpy",
             },
         )
 
@@ -332,6 +361,92 @@ class SimpegGravityInversion:
 
 
 # ──────────────────────────── progress + cancel directive (doc 10 §3) ────────────────────────────
+
+
+# ──────────────────────── GPU dense-G acceleration (doc 10 §8) ────────────────────────
+
+
+def _resolve_use_gpu(mode: str) -> bool:
+    """Decide whether to route the dense-G products through the GPU (doc 10 §8).
+
+    ``"auto"`` → True iff :func:`geosim.compute.gpu_available` (a CuPy-backed CUDA device);
+    ``"off"`` → always host/NumPy; ``"on"`` → require a GPU and raise if none is present so
+    a misconfigured "must-use-GPU" run fails loudly rather than silently going slow.
+    """
+    mode = (mode or "auto").lower()
+    if mode == "off":
+        return False
+    if mode == "on":
+        if not compute.gpu_available():
+            raise ValueError(
+                "use_gpu='on' but no CUDA device is available (geosim.compute reports "
+                "no GPU) — set use_gpu='auto' to fall back to NumPy (doc 10 §8)"
+            )
+        return True
+    # "auto": use the GPU only when one is actually present (this container → NumPy).
+    return compute.gpu_available()
+
+
+def _make_gpu_simulation(gravity_mod: Any) -> type:
+    """Subclass SimPEG's ``Simulation3DIntegral`` to run the dense-G matmul via the GPU.
+
+    The linear gravity forward/adjoint are ``G @ rho`` and ``Gᵀ @ v`` with a dense
+    ``G`` (``n_data × n_active``) — the engine's heaviest cost. This factory returns a
+    subclass that overrides :meth:`fields` / :meth:`Jvec` / :meth:`Jtvec` to stage ``G`` on
+    the active :mod:`geosim.compute` backend **once** (cached on the instance) and run the
+    matmul there (CuPy on a GPU, NumPy on a CPU-only box), bringing only the small result
+    vector back to host. Everything around the dense product — the ``rho`` mapping, the
+    sparse ``rhoDeriv``, the ``sensitivity_dtype`` cast — is preserved verbatim from stock
+    SimPEG, so the NumPy backend is byte-identical and the GPU backend only relocates the
+    matmul (doc 10 §8). Built lazily inside ``run`` so importing the engine never imports
+    SimPEG (doc 10 §8).
+    """
+    base = gravity_mod.simulation.Simulation3DIntegral
+
+    class _GpuSimulation(base):  # type: ignore[misc, valid-type]
+        """Gravity integral simulation with GPU-accelerated dense-G products (doc 10 §8)."""
+
+        _g_device = None  # G staged on the active backend (CuPy/NumPy), lazily cached.
+
+        def _device_G(self):  # noqa: ANN202 - returns a backend array (CuPy or NumPy)
+            """Return ``G`` on the active compute backend, staging + caching on first use."""
+            if self._g_device is None:
+                # ``self.G`` triggers SimPEG's (one-time) dense assembly on host, then we
+                # move it onto the GPU once and reuse it across every CG/GN iteration.
+                self._g_device = compute.to_device(np.asarray(self.G))
+            return self._g_device
+
+        def fields(self, m):  # noqa: ANN001, ANN201 - SimPEG signature
+            """Forward ``d = G·rho`` with the dense matmul on the GPU (doc 10 §8)."""
+            if self.store_sensitivities == "forward_only":
+                return super().fields(m)
+            self.model = m
+            rho = np.asarray(self.rho).astype(self.sensitivity_dtype, copy=False)
+            g = self._device_G()
+            out = g @ compute.to_device(rho)
+            return np.asarray(compute.asnumpy(out))
+
+        def Jvec(self, m, v, f=None):  # noqa: ANN001, ANN201 - SimPEG signature
+            """Sensitivity product ``J·v = G·(rhoDeriv·v)`` on the GPU (doc 10 §8)."""
+            if self.store_sensitivities == "forward_only":
+                return super().Jvec(m, v, f=f)
+            self.model = m
+            dmu_dm_v = np.asarray(self.rhoDeriv @ v).astype(self.sensitivity_dtype, copy=False)
+            g = self._device_G()
+            out = g @ compute.to_device(dmu_dm_v)
+            return np.asarray(compute.asnumpy(out))
+
+        def Jtvec(self, m, v, f=None):  # noqa: ANN001, ANN201 - SimPEG signature
+            """Adjoint product ``Jᵀ·v = rhoDerivᵀ·(Gᵀ·v)`` on the GPU (doc 10 §8)."""
+            if self.store_sensitivities == "forward_only":
+                return super().Jtvec(m, v, f=f)
+            self.model = m
+            vv = np.asarray(v).astype(self.sensitivity_dtype, copy=False)
+            g = self._device_G()
+            gtv = compute.asnumpy(g.T @ compute.to_device(vv))
+            return np.asarray(self.rhoDeriv.T @ gtv)
+
+    return _GpuSimulation
 
 
 class _CancelInversion(Exception):
