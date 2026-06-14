@@ -1,0 +1,61 @@
+{
+  "site": "Utah FORGE (Milford / Roosevelt Hot Springs, Utah, USA)",
+  "center_lonlat": [-112.89, 38.50],
+  "crs": "EPSG:32612",
+  "license": "CC-BY 4.0",
+  "repository": "DOE Geothermal Data Repository (https://gdr.openei.org)",
+  "datasets": [
+    {
+      "method": "gravity", "folder": "measured/gravity",
+      "description": "Complete Bouguer gravity anomaly stations over Utah FORGE (UGS + PACES compilation).",
+      "formats": ["csv/text"], "submission": "https://gdr.openei.org/submissions/1002",
+      "doi": "10.15121/1452751"
+    },
+    {
+      "method": "em", "submethod": "tdem", "folder": "measured/em",
+      "description": "68 transient-electromagnetic (TEM) soundings (USF format) at Utah FORGE.",
+      "formats": ["usf"], "submission": "https://gdr.openei.org/submissions/1002",
+      "doi": "10.15121/1452751"
+    },
+    {
+      "method": "mt", "folder": "measured/mt",
+      "description": "113 magnetotelluric sites (EDI impedance tensors) over the FORGE + Roosevelt Hot Springs footprint, coordinate-filtered from the SW-Utah survey; plus the FORGE 3-D inverted resistivity model and per-site soundings.",
+      "formats": ["edi", "inverted-model (zip)"], "submission": "https://gdr.openei.org/submissions/1578",
+      "doi": "10.15121/2330917"
+    },
+    {
+      "method": "welllog", "folder": "measured/welllog/16A",
+      "description": "Deep well 16A(78)-32 log suite: spectral gamma (LAS), Schlumberger logs, Sanvean logs, cement-bond log, dipole-anisotropy results, and a mud log with temperature.",
+      "formats": ["las", "archives (zip)", "pdf"], "submission": "https://gdr.openei.org/submissions/1292",
+      "doi": "10.15121/1888819"
+    },
+    {
+      "method": "welllog", "folder": "measured/welllog/58-32",
+      "description": "Deep well 58-32 (MU-ESW1) log suite: DSI dipole sonic (Vp/Vs, LAS), Schlumberger logs (FMI, array induction), end-of-well report, and pressure/temperature logs.",
+      "formats": ["las", "archives (zip)"], "submission": "https://gdr.openei.org/submissions/1006",
+      "doi": "10.15121/1452735"
+    },
+    {
+      "method": "heatflow", "folder": "measured/welllog/58-32",
+      "description": "Pressure/temperature logs (LAS + PDF) — bottom-hole temperature and the geothermal gradient for the FORGE deep wells.",
+      "formats": ["las", "pdf"], "submission": "https://gdr.openei.org/submissions/1006"
+    },
+    {
+      "method": "insar", "folder": "measured/insar",
+      "description": "InSAR ground-deformation 2019: mean rate of line-of-sight range change and standard errors (CSV + NetCDF).",
+      "formats": ["csv", "netcdf"], "submission": "https://gdr.openei.org/submissions/1154",
+      "doi": "10.15121/1814559"
+    },
+    {
+      "method": "microseismic", "folder": "measured/microseismic",
+      "description": "Helper script to download the continuous geophone/DAS waveforms from well 78-32 (data hosted at the University of Utah CHPC; tens of GB).",
+      "formats": ["shell script", "docx"], "submission": "https://gdr.openei.org/submissions/1207",
+      "doi": "10.15121/1779110"
+    }
+  ],
+  "not_included": {
+    "magnetics": "No dedicated open FORGE aeromagnetic product found; the synthetic generator provides magnetics.",
+    "seismic_reflection": "No open active-source 3-D seismic cube; synthetic generator provides seismic.",
+    "microseismic_waveforms": "Continuous waveforms are tens of GB off-site (use the helper script)."
+  }
+}

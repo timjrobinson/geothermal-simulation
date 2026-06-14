@@ -51,3 +51,7 @@ scenarios/*/truth/
 .codex/
 .claude/
 AGENTS.md
+
+# Real downloaded test data (large; reproducible via data/utah-forge/fetch.sh)
+/data/utah-forge/measured/
+/.devdata-forge/

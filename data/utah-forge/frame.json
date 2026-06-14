@@ -1,0 +1,32 @@
+{
+  "_comment": "Utah FORGE project SpatialFrame (doc 01). Engineering Frame = local ENU metres, Z-up, anchored at the FORGE site; real data reprojected into this on ingest.",
+  "site": "Utah FORGE (Milford / Roosevelt Hot Springs, Utah, USA)",
+  "anchor_lonlat": [
+    -112.89,
+    38.5
+  ],
+  "surface_elev_m": 1655.0,
+  "mode": "georeferenced",
+  "horizontal_crs": "EPSG:32612",
+  "vertical_datum": "EPSG:3855",
+  "anchor": {
+    "easting": 335189.2247241765,
+    "northing": 4262985.942488537,
+    "elevation": 1655.0
+  },
+  "rotation_deg": 0.0,
+  "axis_convention": "ENU",
+  "length_unit": "m",
+  "roi": {
+    "xmin": -15000,
+    "xmax": 15000,
+    "ymin": -15000,
+    "ymax": 15000
+  },
+  "depth_range": {
+    "zmin": -10000,
+    "zmax": 2000
+  },
+  "surface_model": "dem:copernicus-30m",
+  "georef_status": "survey_controlled"
+}
