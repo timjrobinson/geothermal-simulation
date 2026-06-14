@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import csv
 import io
+import re
 from pathlib import Path
 from typing import Any
 
@@ -60,6 +61,19 @@ _CURVE_TO_PROPERTY: dict[str, str] = {
 }
 # curves carried as methodData (no registry key): gamma proxy etc.
 _NON_REGISTRY = {"GR", "DEPT", "MD"}
+
+# ── real Schlumberger LAS curve families (doc 03 §2 welllog row, real-format branch) ──
+# Picked deterministically by *ordered* preference per property: real logs carry several
+# candidate curves at once (e.g. DTCO compressional + DTSM shear), so the first present
+# canonical curve wins. Slowness curves (us/ft) are inverted to velocity_p (m/s) here.
+_REAL_TEMPERATURE_PREF = ("GTEM", "CTEM", "TEMP", "WTEP")  # borehole / cartridge temp (degF)
+_REAL_VELOCITY_PREF = ("DTCO", "DTC", "DT", "DTCOMP")       # compressional slowness (us/ft)
+_REAL_DENSITY_PREF = ("RHOZ", "RHOB", "RHOM", "DEN")        # bulk density (g/cm3)
+_REAL_RESISTIVITY_PREF = (                                  # deep-reading resistivity (ohm.m)
+    "AT90", "AT60", "RLA5", "RLA4", "RT", "RD", "ILD", "RES", "RESISTIVITY",
+)
+# real gamma curves (no registry key) carried as methodData like synthetic GR.
+_REAL_GAMMA = ("GR_EDTC", "HCGR", "HSGR", "GR", "ECGR", "SGR")
 
 
 @adapter
@@ -108,6 +122,15 @@ class WellLogLasAdapter:
 
         well_id = _well_id(las, source)
         curve_names = list(las.curves.keys())
+
+        # Real-format branch (doc 03 §2 welllog row): a vendor LAS that carries a geographic
+        # wellhead (LATI/LONG in its ~Well header) is an MD-indexed log in FEET with no
+        # deviation survey and no source CRS. We place the well from LATI/LONG (EPSG:4326)
+        # and convert depths ft→m, instead of hard-failing on the missing CRS. The synthetic
+        # round-trip (Engineering-frame LAS + sibling _deviation.csv) keeps the path below.
+        lonlat = _wellhead_lonlat(las)
+        if lonlat is not None:
+            return self._parse_real(source, las, well_id, curve_names, lonlat, warnings)
 
         # locate MD: prefer an explicit MD curve, else the index/DEPT curve.
         md = _curve(las, "MD")
@@ -230,6 +253,153 @@ class WellLogLasAdapter:
             records_dropped=0,
         )
 
+    # ───────────────── real Schlumberger LAS branch (doc 03 §2 welllog row) ─────────────────
+
+    def _parse_real(
+        self,
+        source: RawSource,
+        las: Any,
+        well_id: str,
+        curve_names: list[str],
+        lonlat: tuple[float, float],
+        warnings: list[IngestWarning],
+    ) -> ParseResult:
+        """Parse a real MD-indexed (feet) vendor LAS placed by its LATI/LONG wellhead.
+
+        Coords stay native — the wellhead lon/lat (EPSG:4326) with the MD samples hung
+        vertically below it at *elevation in metres*; ``SourceRef.crs=EPSG:4326`` so the
+        normalizer reprojects into the project frame (no source-CRS hard fail). Depths are
+        FEET (STRT/STOP/STEP ``.F`` / the DEPT|MD curve unit ``F``) → metres. Slowness
+        curves (us/ft) invert to ``velocity_p`` (m/s); temperature (degF) → kelvin via the
+        declared unit; resistivity / density map by their canonical families.
+        """
+        lon, lat = lonlat
+
+        # ── MD axis in feet → metres (units registry) ──
+        md_name = _index_name(las)
+        md_ft = _curve(las, md_name)
+        if md_ft is None:
+            md_ft = np.asarray(las.index, dtype=float)
+        md_unit = _curve_unit(las, md_name)
+        md_m = _to_metres(md_ft, md_unit)
+        n = md_m.size
+        total = int(n)
+
+        # ── wellhead elevation (Elevation of Kelly Bushing, feet) → metres ──
+        elev_ft, elev_unit = _wellhead_elev(las)
+        wh_elev_m = _to_metres(np.asarray([elev_ft]), elev_unit)[0] if elev_ft is not None else 0.0
+        if elev_ft is None:
+            warnings.append(IngestWarning(
+                "no_wellhead_elevation", Severity.LOW,
+                "LAS has no EKB/elevation header; wellhead placed at elevation 0", well_id,
+            ))
+
+        # ── map registry curves by ordered family preference (real Schlumberger mnemonics) ──
+        upper = {c.upper(): c for c in curve_names}
+        values: dict[str, np.ndarray] = {}
+        units: dict[str, str] = {}
+        for prop, pref in (
+            ("temperature", _REAL_TEMPERATURE_PREF),
+            ("velocity_p", _REAL_VELOCITY_PREF),
+            ("density", _REAL_DENSITY_PREF),
+            ("resistivity", _REAL_RESISTIVITY_PREF),
+        ):
+            name = next((upper[k] for k in pref if k in upper), None)
+            if name is None:
+                continue
+            arr = np.asarray(las[name], dtype=float)
+            if arr.size != n:
+                continue
+            unit = _curve_unit(las, name)
+            if prop == "velocity_p" and _is_slowness(unit):
+                # slowness (us/ft) → velocity (m/s): v = 1 / slowness.
+                arr, unit = _slowness_to_velocity(arr, unit)
+            values[prop] = arr
+            units[prop] = _normalize_curve_unit(prop, unit)
+
+        # ── gamma (no registry key) carried as methodData, like synthetic GR ──
+        method_data: dict[str, Any] = {}
+        gname = next((upper[k] for k in _REAL_GAMMA if k in upper), None)
+        if gname is not None:
+            garr = np.asarray(las[gname], dtype=float)
+            if garr.size == n:
+                method_data["GR"] = {
+                    "values": garr.tolist(),
+                    "unit": _curve_unit(las, gname),
+                    "mnemonic": gname,
+                }
+
+        if not values:
+            warnings.append(IngestWarning(
+                "no_known_curves", Severity.MEDIUM,
+                f"no registry-mapped curves among {curve_names}", source.filename,
+            ))
+
+        # ── no deviation survey in the real vendor LAS → vertical-well assumption ──
+        warnings.append(IngestWarning(
+            "no_deviation_survey", Severity.MEDIUM,
+            "no deviation survey — assuming a vertical well (MD=TVD below the wellhead)",
+            well_id,
+        ))
+        # native coords: lon/lat wellhead, elevation (m) decreasing with MD. The normalizer
+        # reprojects EPSG:4326 → project CRS and drapes z into Engineering (z_convention up).
+        cz = wh_elev_m - md_m
+        coords = np.column_stack([np.full(n, lon), np.full(n, lat), cz])
+
+        obs = RawObservation(
+            geometry_kind="wellcurve",
+            coords=coords,
+            values=values,
+            primary_property=next(iter(values), None),
+            meta={
+                "wellId": well_id,
+                "md": md_m.tolist(),
+                "md_unit": "m",
+                "methodData": method_data,
+            },
+        )
+
+        # wellPath feature at the LATI/LONG wellhead (lon/lat; normalizer reprojects).
+        path_coords = [
+            [float(lon), float(lat), float(wh_elev_m)],
+            [float(lon), float(lat), float(wh_elev_m - md_m[-1])] if n else
+            [float(lon), float(lat), float(wh_elev_m)],
+        ]
+        well_path = RawFeature(
+            feature_type="wellPath",
+            geometry={"type": "LineString", "coordinates": path_coords},
+            props={
+                "wellId": well_id,
+                "trajectory": "vertical_assumption",
+                "wellhead": [float(lon), float(lat), float(wh_elev_m)],
+                "md_total": float(md_m[-1]) if n else 0.0,
+            },
+            store_format="geojson",
+        )
+
+        return ParseResult(
+            observations=[obs],
+            features=[well_path],
+            source=SourceRef(
+                # LATI/LONG wellhead → normalizer reprojects (no source-CRS hard fail).
+                crs="EPSG:4326",
+                vertical_datum=None,
+                horizontal_unit="deg",
+                # z is already resolved to metres elevation below the wellhead.
+                z_convention="elevation_up",
+            ),
+            units=units,
+            provenance=Provenance(
+                process="ingest:welllog-las-v1",
+                params={"wellId": well_id, "curves": list(values.keys()),
+                        "trajectory": "vertical_assumption", "format": "real_las",
+                        "wellhead_lonlat": [float(lon), float(lat)]},
+            ),
+            warnings=warnings,
+            records_total=total,
+            records_dropped=0,
+        )
+
 
 def _read_text(source: RawSource) -> str | None:
     if source.data is not None:
@@ -252,6 +422,168 @@ def _curve_unit(las: Any, name: str) -> str:
     except Exception:
         unit = ""
     return unit or "dimensionless"
+
+
+# ── real-LAS helpers (LATI/LONG wellhead, feet depths, slowness, units) ──
+
+# Foot-family + metre depth/elevation units seen in vendor LAS headers (~Well STRT/EKB,
+# DEPT/MD curve unit). LAS is overwhelmingly feet ('F' / 'ft'); accept metres too.
+_FEET_UNITS = {"f", "ft", "feet", "foot"}
+_METRE_UNITS = {"m", "metre", "meter", "metres", "meters"}
+# slowness units (Δt) that must be inverted to velocity_p (m/s).
+_SLOWNESS_UNITS = {"us/ft", "usec/ft", "us/f", "us/m", "usec/m"}
+
+
+def _index_name(las: Any) -> str:
+    """Name of the MD/DEPT index curve (first curve), for unit + array lookup."""
+    try:
+        return las.curves[0].mnemonic
+    except Exception:
+        return "DEPT"
+
+
+def _to_metres(arr: np.ndarray, unit: str) -> np.ndarray:
+    """Depth/elevation array → metres. Feet (LAS default) → m; metres pass through."""
+    u = (unit or "").strip().lower()
+    if u in _FEET_UNITS:
+        return np.asarray(arr, dtype=float) * 0.3048
+    if u in _METRE_UNITS or u in ("", "dimensionless"):
+        return np.asarray(arr, dtype=float)
+    # unknown depth unit: assume feet (the LAS norm) rather than silently mixing units.
+    return np.asarray(arr, dtype=float) * 0.3048
+
+
+def _is_slowness(unit: str) -> bool:
+    return (unit or "").strip().lower().replace(" ", "") in _SLOWNESS_UNITS
+
+
+def _slowness_to_velocity(arr: np.ndarray, unit: str) -> tuple[np.ndarray, str]:
+    """Interval slowness Δt → velocity_p (m/s): v = 1/Δt with the foot/metre factor.
+
+    us/ft: v[m/s] = 0.3048 / (Δt·1e-6). us/m: v[m/s] = 1 / (Δt·1e-6). NULLs/zeros → NaN.
+    """
+    u = (unit or "").strip().lower().replace(" ", "")
+    a = np.asarray(arr, dtype=float)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        if u in ("us/m", "usec/m"):
+            v = 1.0 / (a * 1e-6)
+        else:  # us/ft family
+            v = 0.3048 / (a * 1e-6)
+    v[~np.isfinite(v)] = np.nan
+    return v, "m/s"
+
+
+def _normalize_curve_unit(prop: str, unit: str) -> str:
+    """Map a vendor curve unit string to one the registry/pint understands (doc 01 §5).
+
+    Temperature is declared so the normalizer converts to kelvin (degF→K); resistivity
+    ohm.m spellings are kept (the normalizer aliases them); density g/cm3 → registry.
+    """
+    u = (unit or "").strip()
+    if prop == "temperature":
+        low = u.lower()
+        if low in ("degf", "f", "deg f", "fahrenheit"):
+            return "degF"
+        if low in ("degc", "c", "deg c", "celsius"):
+            return "degC"
+        if low in ("k", "kelvin"):
+            return "kelvin"
+        return "degF"  # vendor borehole-temp curves are Fahrenheit
+    if prop == "density":
+        low = u.lower().replace(" ", "")
+        if low in ("g/cm3", "g/cc", "gm/cc", "g/cm**3"):
+            return "g/cm**3"
+        return u or "kg/m**3"
+    if prop == "velocity_p":
+        return u or "m/s"
+    if prop == "resistivity":
+        return u or "ohm*m"
+    return u or "dimensionless"
+
+
+def _wellhead_lonlat(las: Any) -> tuple[float, float] | None:
+    """Wellhead (lon, lat) decimal degrees from the ~Well LATI/LONG headers, else None.
+
+    Handles both real vendor encodings: DMS with degree/minute/second glyphs + N/S/E/W
+    (e.g. ``38° 30' 14.447" N`` / ``112° 53' 47.066" W``) and plain decimal degrees
+    (e.g. ``38.500562 degrees`` / ``-112.88703 degrees``). None when absent/unparseable
+    (keeps the synthetic Engineering-frame path, which carries no LATI/LONG, on its branch).
+    """
+    lat = _parse_latlon(_well_header(las, ("LATI", "LAT", "SLAT")), is_lat=True)
+    lon = _parse_latlon(_well_header(las, ("LONG", "LON", "SLON")), is_lat=False)
+    if lat is None or lon is None:
+        return None
+    if not (-90.0 <= lat <= 90.0 and -180.0 <= lon <= 180.0):
+        return None
+    return (lon, lat)
+
+
+def _well_header(las: Any, keys: tuple[str, ...]) -> str | None:
+    """Raw value string of the first present ~Well header among ``keys``."""
+    for k in keys:
+        try:
+            item = las.well[k]
+        except Exception:
+            continue
+        # lasio stores the parsed value; fall back to descr for headers it mangles.
+        for attr in (item.value, getattr(item, "descr", None)):
+            if attr is None:
+                continue
+            s = str(attr).strip()
+            if s:
+                return s
+    return None
+
+
+def _parse_latlon(raw: str | None, *, is_lat: bool) -> float | None:
+    """Parse a LATI/LONG header string (DMS or decimal degrees) → signed decimal degrees."""
+    if not raw:
+        return None
+    s = raw.strip()
+    # plain decimal degrees, e.g. '-112.88703 degrees' or '38.500562'
+    m = re.search(r"[-+]?\d+(?:\.\d+)?", s)
+    has_dms = bool(re.search(r"[°º'′\"″]", s)) or \
+        bool(re.search(r"\d+\s+\d+\s+\d", s))
+    # Hemisphere is a *standalone* N/S/E/W token (not a letter inside a word like
+    # "degrees"): require it bounded by start/space/punct on both sides.
+    hemi_m = re.search(r"(?:^|[\s,;])([NSEWnsew])(?:$|[\s,;.])", s)
+    hemi = hemi_m.group(1).upper() if hemi_m else None
+
+    if not has_dms and m is not None:
+        val = float(m.group(0))
+        if hemi in ("S", "W"):
+            val = -abs(val)
+        return val
+
+    # DMS: split degrees/minutes/seconds tolerating the glyph variants (and spaces).
+    nums = re.findall(r"\d+(?:\.\d+)?", s)
+    if not nums:
+        return None
+    deg = float(nums[0])
+    minutes = float(nums[1]) if len(nums) > 1 else 0.0
+    seconds = float(nums[2]) if len(nums) > 2 else 0.0
+    val = abs(deg) + minutes / 60.0 + seconds / 3600.0
+    if hemi in ("S", "W") or deg < 0:
+        val = -val
+    return val
+
+
+def _wellhead_elev(las: Any) -> tuple[float | None, str]:
+    """Wellhead elevation value + unit (Elevation of Kelly Bushing, feet) from ~Well/~Param."""
+    for key in ("EKB", "EDF", "ELEV", "EGL", "KB", "APD"):
+        try:
+            item = las.well[key]
+        except Exception:
+            try:
+                item = las.params[key]
+            except Exception:
+                continue
+        try:
+            val = float(item.value)
+        except (TypeError, ValueError):
+            continue
+        return val, (item.unit or "F")
+    return None, "F"
 
 
 def _well_id(las: Any, source: RawSource) -> str:

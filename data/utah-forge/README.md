@@ -66,15 +66,15 @@ carry vendor quirks, so this dataset is also a hardening target. Current status:
 
 | Method | Files | Ingests? |
 |---|---|---|
-| **Gravity** | 1 (3735 stations) | ✅ — adapter now reads `gCBGA/gSBGA/gFA` + lon/lat |
-| **Magnetotellurics** | 113 sites | ✅ — adapter now computes apparent resistivity + phase from the impedance tensor (`>ZXYR/>ZXYI`) and reads `REFLAT/REFLONG` |
-| **EM / TEM** | 68 soundings | ⚠️ — Zonge `.usf` format not yet parsed (synthetic EM uses a different layout) |
-| **Well logs / temperature** | LAS + archives | ⚠️ — MD-indexed curves need CRS-free placement; adapter tweak pending |
-| **InSAR** | CSV/NetCDF (in zip) | ⚠️ — extract from `insar_2019.zip`; column mapping pending |
+| **Gravity** | 1 (3735 stations) | ✅ reads `gCBGA/gSBGA/gFA` + lon/lat |
+| **Magnetotellurics** | 113 sites | ✅ computes apparent resistivity + phase from the impedance tensor (`>ZXYR/>ZXYI`); reads `REFLAT/REFLONG` |
+| **EM / TEM** | 68 soundings | ✅ Zonge `.usf` parsed (`//EPSG`, `/LOCATION`, `TIME/VOLTAGE` decay) |
+| **Well logs / temperature** | 2 deep wells | ✅ wellhead from `LATI/LONG` DMS, feet→m, curve→property mapping (temperature/Vp/density/resistivity) |
+| **InSAR** | 2 grids (avg + σ) | ✅ headerless UTM point-CSV (3.2M pts) binned to a deformation grid |
 
-So **gravity + 113 MT sites load today** (enough to build a fused resistivity + density
-model and invert). The ⚠️ methods are concrete next adapter-hardening steps. The loader
-prints per-file success/failure.
+**All 186 native files ingest (0 failures).** `data/load_utah_forge.py` builds a fused
+resistivity + density + deformation model over the FORGE footprint that you can
+cross-plot, run rock-physics on, and invert. The loader prints per-file success/failure.
 
 ## Citation
 
