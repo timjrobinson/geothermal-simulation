@@ -44,3 +44,10 @@ scenarios/*/truth/
 
 # MkDocs build output
 /site/
+
+# Agent / task-tracking tooling (local only — not part of the project)
+.beads/
+.agents/
+.codex/
+.claude/
+AGENTS.md
