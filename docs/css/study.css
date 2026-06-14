@@ -92,3 +92,15 @@
 .fc-g3 { background: #9e9d24; } .fc-g4 { background: #558b2f; } .fc-g5 { background: #2e7d32; }
 .fc-done { text-align: center; padding: 2rem; }
 .fc-toolbar { display: flex; gap: 0.5rem; justify-content: flex-end; margin-bottom: 0.5rem; }
+
+/* ── Progress dashboard ─────────────────────────────────────────────────── */
+.pg-chart { background: var(--md-code-bg-color); border-radius: 0.4rem; padding: 0.6rem; margin: 0.4rem 0 1.6rem; }
+.pg-sub { font-size: 0.8rem; opacity: 0.7; margin-top: -0.4rem; }
+.pg-mastery { margin: 0.5rem 0 1.6rem; }
+.pg-bar { display: flex; height: 1.4rem; border-radius: 0.3rem; overflow: hidden; background: var(--md-default-fg-color--lightest); }
+.pg-seg { display: block; height: 100%; }
+.pg-mastered { background: #2e7d32; } .pg-learning { background: #f9a825; } .pg-new { background: var(--md-default-fg-color--lighter); }
+.pg-legend { display: flex; gap: 1.2rem; font-size: 0.75rem; margin-top: 0.45rem; flex-wrap: wrap; }
+.pg-legend i { display: inline-block; width: 0.7rem; height: 0.7rem; border-radius: 0.15rem; vertical-align: -0.05rem; margin-right: 0.3rem; }
+.pg-legend i.pg-mastered { background: #2e7d32; } .pg-legend i.pg-learning { background: #f9a825; } .pg-legend i.pg-new { background: var(--md-default-fg-color--lighter); }
+.pg-table { width: 100%; font-size: 0.82rem; } .pg-mini { opacity: 0.6; }

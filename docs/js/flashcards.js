@@ -124,8 +124,14 @@
   }
 
   function grade(card, q) {
-    progress[card.id] = schedule(progress[card.id], q);
+    const st = schedule(progress[card.id], q);
+    progress[card.id] = st;
     save(PROGRESS_KEY, progress);
+    // Log the review for the Progress dashboard (mastered-over-time + activity).
+    const hist = load("fc-history-v1", []);
+    hist.push({ t: Date.now(), id: card.id, q, reps: st.reps, interval: st.interval, page: card.page });
+    if (hist.length > 8000) hist.splice(0, hist.length - 8000);
+    save("fc-history-v1", hist);
     revealed = false;
     render();
   }
@@ -166,15 +172,22 @@
   }
 
   async function loadDeck() {
+    let base = null;
     try {
       const r = await fetch("deck.json", { cache: "no-cache" });
-      if (r.ok) return (await r.json()).cards || [];
+      if (r.ok) base = (await r.json()).cards || [];
     } catch (e) {}
-    try {
-      const r = await fetch(API + "/api/flashcards");
-      if (r.ok) return (await r.json()).cards || [];
-    } catch (e) {}
-    return null;
+    if (!base) {
+      try {
+        const r = await fetch(API + "/api/flashcards");
+        if (r.ok) base = (await r.json()).cards || [];
+      } catch (e) {}
+    }
+    // Merge user-added cards (created from weak exam answers). These work even with no
+    // generated deck, so a learner can build a deck purely from their exam mistakes.
+    const user = load("fc-user-cards-v1", []);
+    if (base) return base.concat(user);
+    return user.length ? user : null;
   }
 
   async function init() {
