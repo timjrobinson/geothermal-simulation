@@ -4,6 +4,12 @@
   "service": "app",
   "workspaceFolder": "/workspaces/simulation",
 
+  // Request the host GPU (RTX 4090) for CuPy/PyTorch-accelerated inversions/modelling.
+  // "optional" → the container still builds on hosts without a GPU. The GPU is passed
+  // through by the docker-compose `app` service (deploy.resources.devices); the host
+  // needs the NVIDIA Container Toolkit installed.
+  "hostRequirements": { "gpu": "optional" },
+
   // Toolchain layered on top of the Python base image (see Dockerfile).
   "features": {
     "ghcr.io/devcontainers/features/node:1": { "version": "20" },

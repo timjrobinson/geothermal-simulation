@@ -14,6 +14,20 @@ services:
     environment:
       DATABASE_URL: postgresql+psycopg://geo:geo@db:5432/geothermal
       REDIS_URL: redis://redis:6379/0
+      # Expose the host NVIDIA GPU (e.g. an RTX 4090) for CuPy/PyTorch + GPU-accelerated
+      # inversions. Requires the NVIDIA Container Toolkit on the host; then rebuild the
+      # devcontainer and `uv pip install -e ".[gpu]"` in backend/. Harmless if no GPU.
+      NVIDIA_VISIBLE_DEVICES: all
+      NVIDIA_DRIVER_CAPABILITIES: compute,utility
+    # GPU reservation (NVIDIA Container Toolkit). Comment out if your host has no GPU and
+    # `docker compose up` complains; the stack runs fine on CPU without it.
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
     depends_on:
       db:
         condition: service_healthy
