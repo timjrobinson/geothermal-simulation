@@ -40,3 +40,4 @@ scenarios/*/truth/
 
 # OS
 .DS_Store
+/.devdata/
