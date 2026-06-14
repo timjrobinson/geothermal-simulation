@@ -19,6 +19,7 @@ project directory + catalog rows + doc-01 ``SpatialFrame``), ``GET /api/capabili
 from __future__ import annotations
 
 import json
+import logging
 import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -47,10 +48,13 @@ from geosim.storage import ensure_project_layout
 from .features import build_feature_router
 from .frame_io import frame_from_dict, frame_from_row, frame_row_kwargs, frame_to_dict
 from .fusion import build_fusion_router
-from .geomodel import build_geomodel_router
-from .inversion import build_inversion_router
 from .planning import build_planning_router
 from .property_models import build_property_model_router
+
+# NOTE: the inversion (SimPEG/discretize) and geomodel (GemPy) routers are imported
+# LAZILY inside create_app — they depend on heavy, OPTIONAL solver extras (doc 10 is
+# explicitly later-phase/non-blocking, doc 08 executionMode worker/container). The core
+# platform must run on the default install without them. See _include_optional_routers.
 from .schemas import (
     DemoJobRequest,
     EnqueueResponse,
@@ -166,6 +170,32 @@ def _demo_job_fn(params: dict[str, Any], reporter: ProgressReporter) -> dict[str
     return {"steps": steps, "done": True}
 
 
+_log = logging.getLogger("geosim.api")
+
+
+def _include_optional_routers(app: FastAPI, session_dep: Any) -> None:
+    """Mount routers whose deps are OPTIONAL heavy-solver extras, skipping any that
+    aren't installed. The core platform (projects, capabilities, property-models,
+    fusion, features, planning) never depends on these, so a missing extra disables
+    just its endpoints (logged) instead of breaking app startup (doc 10 non-blocking).
+    """
+    optional = [
+        ("inversion", "geosim.api.inversion", "build_inversion_router", "inversion"),
+        ("geomodel", "geosim.api.geomodel", "build_geomodel_router", "geomodel"),
+    ]
+    import importlib
+
+    for name, module, factory, extra in optional:
+        try:
+            mod = importlib.import_module(module)
+            app.include_router(getattr(mod, factory)(session_dep))
+        except ImportError as exc:  # heavy extra not installed → disable just this surface
+            _log.warning(
+                "optional %s API disabled (install the '%s' extra to enable it): %s",
+                name, extra, exc,
+            )
+
+
 def create_app(settings: Settings | None = None) -> FastAPI:
     """Build the FastAPI app with DI'd catalog/storage/jobs (doc 04 §9).
 
@@ -235,18 +265,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # catalog session + storage_root DI off app.state (doc 09 §10, doc 04 §9).
     app.include_router(build_planning_router(session_dep))
 
-    # Inversion surface (doc 10 §3): POST /property-models:invert enqueues an inversion job
-    # (validated params → recovered PropertyModel + mandatory uncertainty + provenance →
-    # fused resample) and GET /inversion-engines lists the registered engine palette.
-    # Progress/cancel reuse the doc-04 job endpoints unchanged (doc 08 §4f).
-    app.include_router(build_inversion_router(session_dep))
-
-    # Implicit geomodel surface (OVERVIEW §6 L4 / doc 07, M8): POST /projects/{pid}/geomodel
-    # builds a GemPy implicit model from horizon/fault contacts + well tops over the project
-    # SpatialFrame ROI×depthRange, then catalogs a categorical lithology_class PropertyModel
-    # (doc 02 §10.2) + one unitSolid feature per unit (doc 02 §5). Sits beside M7, not on its
-    # critical path. Shares the catalog session + storage_root DI off app.state (doc 04 §9).
-    app.include_router(build_geomodel_router(session_dep))
+    # Optional heavy-solver surfaces (loaded only if their extras are installed):
+    #  - Inversion (doc 10 §3, SimPEG/discretize/PyGIMLi): POST /property-models:invert +
+    #    GET /inversion-engines; progress/cancel reuse the doc-04 job endpoints (doc 08 §4f).
+    #  - Implicit geomodel (OVERVIEW §6 L4 / doc 07, M8, GemPy): POST /projects/{pid}/geomodel
+    #    → categorical lithology_class PropertyModel (doc 02 §10.2) + unitSolid features.
+    # Both are later-phase/non-blocking; the core platform runs without their deps installed.
+    _include_optional_routers(app, session_dep)
 
     # ──────────────────────────────── capabilities (doc 08 §7.1) ────────────────────────────
     @app.get("/api/capabilities")
