@@ -16,7 +16,7 @@ PYTEST       := $(PY) -m pytest
 UV           := uv
 NPM          := npm
 DEV_DATA     := .devdata           # persistent catalog + storage for `make demo`
-HOST         ?= 127.0.0.1
+HOST         ?= 0.0.0.0             # bind all interfaces so devcontainer port-forwarding reaches it
 PORT         ?= 8000
 SCENARIO     ?= great-basin-v1     # override: make scenario SCENARIO=unit-cube-v1
 
