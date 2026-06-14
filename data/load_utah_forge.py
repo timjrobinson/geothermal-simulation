@@ -69,6 +69,9 @@ def main() -> None:
     files = []
     for p in sorted((FORGE / "measured").rglob("*")):
         if p.is_file() and p.suffix.lower() in NATIVE_EXT:
+            low = p.name.lower()
+            if "metadata" in low or "readme" in low:  # descriptive, not data
+                continue
             files.append(p)
 
     ok = warn = fail = skip = 0
@@ -88,10 +91,11 @@ def main() -> None:
                     method_hint=method, crs_hint=CRS_HINT.get(method),
                 )
                 s.commit()
-            status = getattr(rep, "status", "?")
-            n = sum(len(getattr(rep, a, []) or []) for a in ("observations", "property_models", "features"))
-            mark = {"ok": "✓", "ok_with_warnings": "✓", "failed": "✗"}.get(status, "?")
-            print(f"  {mark} [{method:>11}] {p.name}  → {status} ({n} primitives)")
+            status = rep.status.value if hasattr(rep.status, "value") else str(rep.status)
+            n = rep.n_observations + rep.n_property_models + rep.n_features
+            mark = {"failed": "✗"}.get(status, "✓")
+            print(f"  {mark} [{method:>11}] {p.name}  → {status} ({n} primitives, "
+                  f"{rep.records_total - rep.records_dropped}/{rep.records_total} records)")
             if status == "failed":
                 fail += 1
             elif status == "ok_with_warnings":

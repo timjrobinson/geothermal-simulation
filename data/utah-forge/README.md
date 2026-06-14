@@ -59,12 +59,22 @@ This creates a georeferenced project from `frame.json` and ingests every native 
 reprojecting each into the FORGE Engineering Frame. Then point the viewer at it
 (`make run-frontend`).
 
-!!! note "Real-data caveat"
-    The ingestion adapters were built and tested against the synthetic generator's
-    outputs, which mimic these formats. Real field files carry vendor-specific quirks
-    (header variants, units, null conventions), so some files may need small adapter
-    tweaks — that's exactly the kind of real-world hardening this dataset is here to
-    exercise. The loader reports per-file success/failure.
+### Ingestion status (real-world hardening)
+
+The adapters were first built against the synthetic generator's outputs; real field files
+carry vendor quirks, so this dataset is also a hardening target. Current status:
+
+| Method | Files | Ingests? |
+|---|---|---|
+| **Gravity** | 1 (3735 stations) | ✅ — adapter now reads `gCBGA/gSBGA/gFA` + lon/lat |
+| **Magnetotellurics** | 113 sites | ✅ — adapter now computes apparent resistivity + phase from the impedance tensor (`>ZXYR/>ZXYI`) and reads `REFLAT/REFLONG` |
+| **EM / TEM** | 68 soundings | ⚠️ — Zonge `.usf` format not yet parsed (synthetic EM uses a different layout) |
+| **Well logs / temperature** | LAS + archives | ⚠️ — MD-indexed curves need CRS-free placement; adapter tweak pending |
+| **InSAR** | CSV/NetCDF (in zip) | ⚠️ — extract from `insar_2019.zip`; column mapping pending |
+
+So **gravity + 113 MT sites load today** (enough to build a fused resistivity + density
+model and invert). The ⚠️ methods are concrete next adapter-hardening steps. The loader
+prints per-file success/failure.
 
 ## Citation
 

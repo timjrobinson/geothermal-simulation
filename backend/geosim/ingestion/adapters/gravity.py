@@ -44,11 +44,23 @@ __all__ = ["GravityPotentialFieldAdapter"]
 # Column aliases for the synthgen + common Bouguer station CSV (case-insensitive).
 _X_KEYS = {"x", "easting", "east", "lon", "longitude"}
 _Y_KEYS = {"y", "northing", "north", "lat", "latitude"}
-_Z_KEYS = {"z", "elev", "elevation", "height", "alt", "altitude"}
+_Z_KEYS = {"z", "elev", "elevation", "height", "alt", "altitude", "hae", "ngvd29"}
+# Bouguer-anomaly columns — synthgen's `bouguer_mgal` plus real survey columns:
+# gCBGA (complete Bouguer), gSBGA (simple Bouguer), gFA (free-air).
 _G_KEYS = {
     "bouguer_mgal", "bouguer", "gravity_anomaly", "gravity", "ga", "mgal", "anomaly",
+    "gcbga", "gsbga", "gfa", "cbga", "sbga",
 }
-_S_KEYS = {"sigma", "error", "err", "std", "uncertainty"}
+_S_KEYS = {"sigma", "error", "err", "std", "uncertainty", "errg"}
+
+# Ordered preferences — real files carry several coordinate/anomaly columns at once, so
+# pick deterministically: geographic lon/lat first (self-describing as EPSG:4326), and
+# the complete-Bouguer reduction over simpler ones.
+_X_PREF = ("x", "lon", "longitude", "easting", "east")
+_Y_PREF = ("y", "lat", "latitude", "northing", "north")
+_G_PREF = ("bouguer_mgal", "gcbga", "gsbga", "gfa", "cbga", "sbga", "bouguer",
+           "gravity_anomaly", "gravity", "ga", "mgal", "anomaly")
+_GEO_COLS = {"lon", "longitude", "lat", "latitude"}
 
 # GeoTIFF (Bouguer grid) magic + filename hints.
 _TIF_EXT = (".tif", ".tiff")
@@ -115,9 +127,10 @@ class GravityPotentialFieldAdapter:
             )])
 
         cols = {c.lower(): c for c in df.columns}
-        xcol = _pick(cols, _X_KEYS)
-        ycol = _pick(cols, _Y_KEYS)
-        gcol = _pick(cols, _G_KEYS)
+        xcol = _pick_ordered(cols, _X_PREF)
+        ycol = _pick_ordered(cols, _Y_PREF)
+        gcol = _pick_ordered(cols, _G_PREF)
+        geographic = (xcol is not None and xcol.lower() in _GEO_COLS)
         if xcol is None or ycol is None or gcol is None:
             return ParseResult(warnings=[IngestWarning(
                 "bad_header", Severity.HIGH,
@@ -161,9 +174,10 @@ class GravityPotentialFieldAdapter:
         return ParseResult(
             observations=[obs],
             source=SourceRef(
-                crs=meta.get("crs") or source.crs_hint,
+                # geographic lon/lat columns are self-describing as EPSG:4326
+                crs=meta.get("crs") or source.crs_hint or ("EPSG:4326" if geographic else None),
                 vertical_datum=meta.get("vertical_datum"),
-                horizontal_unit=meta.get("horizontal_unit", "m"),
+                horizontal_unit="deg" if geographic else meta.get("horizontal_unit", "m"),
                 z_convention=meta.get("z_convention", "elevation_up"),
             ),
             units={"gravity_anomaly": meta.get("unit", "mGal")},
@@ -275,4 +289,12 @@ def _pick(cols: dict[str, str], keys: set[str]) -> str | None:
     for low, orig in cols.items():
         if low in keys:
             return orig
+    return None
+
+
+def _pick_ordered(cols: dict[str, str], pref: tuple[str, ...]) -> str | None:
+    """Return the first column (by preference order) present in ``cols``."""
+    for k in pref:
+        if k in cols:
+            return cols[k]
     return None

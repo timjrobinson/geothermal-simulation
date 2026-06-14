@@ -18,6 +18,8 @@ blocks degrade gracefully with a structured warning (doc 03 §6).
 
 from __future__ import annotations
 
+import re
+
 import numpy as np
 
 from ..base import (
@@ -68,11 +70,21 @@ class MtEdiAdapter:
         rho = _data_block(text, "RHOXY")
         phase = _data_block(text, "PHSXY")
 
+        # Real EDIs often store only the impedance tensor; compute apparent resistivity +
+        # phase from >ZXYR/>ZXYI when no precomputed >RHOXY block is present (Cagniard).
         if rho.size == 0:
-            return ParseResult(warnings=[IngestWarning(
-                "no_apparent_resistivity", Severity.HIGH,
-                "EDI has no >RHOXY apparent-resistivity block", source.filename,
-            )])
+            rho, phase = _impedance_app_res(text, freq)
+            if rho.size == 0:
+                return ParseResult(warnings=[IngestWarning(
+                    "no_apparent_resistivity", Severity.HIGH,
+                    "EDI has neither a >RHOXY block nor a >ZXYR/>ZXYI impedance tensor",
+                    source.filename,
+                )])
+            warnings.append(IngestWarning(
+                "computed_app_res", Severity.LOW,
+                "apparent resistivity + phase computed from the impedance tensor "
+                "(Cagniard); no >RHOXY block present", source.filename,
+            ))
         if phase.size == 0:
             warnings.append(IngestWarning(
                 "no_phase", Severity.MEDIUM, "EDI has no >PHSXY phase block",
@@ -80,15 +92,23 @@ class MtEdiAdapter:
             ))
 
         n = rho.size
-        sx, sy = refloc if refloc is not None else (0.0, 0.0)
-        if refloc is None:
-            warnings.append(IngestWarning(
-                "no_location", Severity.HIGH,
-                "EDI has no DEFINEMEAS REFLOC; site placed at origin", source.filename,
-            ))
-        coords = np.column_stack([
-            np.full(n, sx), np.full(n, sy), np.zeros(n)
-        ])
+        # Site location: REFLOC=x,y (synthgen) or REFLAT/REFLONG lat/lon (real EDIs).
+        geographic = False
+        if refloc is not None:
+            sx, sy = refloc
+        else:
+            lonlat = _reflatlon(text)
+            if lonlat is not None:
+                sx, sy = lonlat
+                geographic = True
+            else:
+                sx, sy = 0.0, 0.0
+                warnings.append(IngestWarning(
+                    "no_location", Severity.HIGH,
+                    "EDI has no REFLOC or REFLAT/REFLONG; site placed at origin",
+                    source.filename,
+                ))
+        coords = np.column_stack([np.full(n, sx), np.full(n, sy), np.zeros(n)])
 
         values: dict[str, np.ndarray] = {"resistivity": rho}
         units = {"resistivity": "ohm*m"}
@@ -109,7 +129,11 @@ class MtEdiAdapter:
         )
         return ParseResult(
             observations=[obs],
-            source=SourceRef(crs=source.crs_hint, z_convention="elevation_up"),
+            source=SourceRef(
+                crs=source.crs_hint or ("EPSG:4326" if geographic else None),
+                horizontal_unit="deg" if geographic else "m",
+                z_convention="elevation_up",
+            ),
             units=units,
             provenance=Provenance(process="ingest:mt-edi-v1"),
             warnings=warnings,
@@ -139,6 +163,48 @@ def _refloc(text: str) -> tuple[float, float] | None:
         return float(parts[0]), float(parts[1])
     except (ValueError, IndexError):
         return None
+
+
+def _impedance_app_res(text: str, freq: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Apparent resistivity (Ω·m) + phase (deg) from the off-diagonal impedance Z=Zxy when
+    no precomputed ``>RHOXY`` block exists. Cagniard relation, EDI field units
+    ``[(mV/km)/nT]``: ``ρ_a = 0.2·T·|Z|²`` with period ``T = 1/f``; ``φ = atan2(Im Z, Re Z)``.
+    EDI no-data markers (≈1e32) are masked to NaN."""
+    zr = _data_block(text, "ZXYR")
+    zi = _data_block(text, "ZXYI")
+    n = min(zr.size, zi.size, freq.size)
+    if n == 0:
+        return np.zeros(0), np.zeros(0)
+    zr, zi, f = zr[:n], zi[:n], freq[:n]
+    bad = (np.abs(zr) > 1e30) | (np.abs(zi) > 1e30) | (f <= 0)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        rho = 0.2 * (1.0 / f) * (zr * zr + zi * zi)
+        phase = np.degrees(np.arctan2(zi, zr))
+    rho[bad] = np.nan
+    phase[bad] = np.nan
+    return rho, phase
+
+
+def _reflatlon(text: str) -> tuple[float, float] | None:
+    """Parse ``REFLAT``/``REFLONG`` (or ``LAT``/``LONG``) — DMS ``±DD:MM:SS.s`` or decimal —
+    into ``(lon, lat)`` decimal degrees."""
+    def dec(s: str | None) -> float | None:
+        if s is None:
+            return None
+        m = re.match(r"([+-]?)(\d+):(\d+):([\d.]+)", s.strip())
+        if not m:
+            try:
+                return float(s)
+            except ValueError:
+                return None
+        sign = -1.0 if m.group(1) == "-" else 1.0
+        return sign * (int(m.group(2)) + int(m.group(3)) / 60 + float(m.group(4)) / 3600)
+
+    lat = dec(_scalar(text, "REFLAT") or _scalar(text, "LAT"))
+    lon = dec(_scalar(text, "REFLONG") or _scalar(text, "REFLON") or _scalar(text, "LONG"))
+    if lat is None or lon is None:
+        return None
+    return lon, lat
 
 
 def _data_block(text: str, tag: str) -> np.ndarray:
