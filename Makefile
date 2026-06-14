@@ -18,6 +18,7 @@ NPM          := npm
 DEV_DATA     := .devdata           # persistent catalog + storage for `make demo`
 HOST         ?= 0.0.0.0             # bind all interfaces so devcontainer port-forwarding reaches it
 PORT         ?= 8000
+PORT2        ?= 8002                # study server (AI exams + flashcards)
 SCENARIO     ?= great-basin-v1     # override: make scenario SCENARIO=unit-cube-v1
 
 .DEFAULT_GOAL := help
@@ -151,6 +152,22 @@ docs: ## Serve the docs site with live reload (http://localhost:8001)
 .PHONY: docs-build
 docs-build: ## Build the static docs site to ./site (strict: fails on broken links)
 	$(VENV)/bin/mkdocs build --strict
+
+# =================================================================================
+# Study tools (AI exams per page + spaced-repetition flashcards; use local `claude -p`)
+# =================================================================================
+.PHONY: study
+study: docs-build ## Build docs + serve them WITH the AI-exam/flashcard API (http://localhost:8002)
+	@echo "Open http://localhost:$(PORT2)  — 'Generate Exam' on every page + the Flashcards page"
+	$(VENV)/bin/uvicorn study.server:app --host $(HOST) --port $(PORT2)
+
+.PHONY: study-api
+study-api: ## Run ONLY the exam/flashcard API (pair with `make docs` live-reload on :8001)
+	$(VENV)/bin/uvicorn study.server:app --host $(HOST) --port $(PORT2) --reload
+
+.PHONY: flashcards
+flashcards: ## Generate the flashcard deck from the docs via local `claude -p` (minutes)
+	$(PY) study/generate_flashcards.py
 
 # =================================================================================
 # Combined / CI

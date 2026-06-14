@@ -52,9 +52,14 @@ markdown_extensions:
       emoji_index: !!python/name:material.extensions.emoji.twemoji
       emoji_generator: !!python/name:material.extensions.emoji.to_svg
 
+extra_css:
+  - css/study.css
+
 extra_javascript:
   - js/mathjax.js
   - https://unpkg.com/mathjax@3/es5/tex-mml-chtml.js
+  - js/study.js        # "Generate Exam" button on every page (calls the study server)
+  - js/flashcards.js   # spaced-repetition flashcards app (flashcards page)
 
 nav:
   - Home: index.md
@@ -83,6 +88,8 @@ nav:
       - The 3D viewer: visualization.md
       - Drilling & well planning: well-planning.md
       - Forward modeling & inversion: inversion.md
+  - Study:
+      - Flashcards: flashcards.md
   - Reference:
       - The synthetic data generator: synthetic-data.md
       - Codebase architecture: architecture.md
