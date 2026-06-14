@@ -138,6 +138,21 @@ typecheck: ## Type-check the frontend (tsc --noEmit)
 	cd $(FRONTEND) && $(NPM) run typecheck
 
 # =================================================================================
+# Documentation (MkDocs Material — browsable site)
+# =================================================================================
+.PHONY: install-docs
+install-docs: ## Install the docs toolchain (mkdocs-material) into the backend venv
+	cd $(BACKEND) && $(UV) pip install -e ".[docs]"
+
+.PHONY: docs
+docs: ## Serve the docs site with live reload (http://localhost:8001)
+	$(VENV)/bin/mkdocs serve -a $(HOST):8001
+
+.PHONY: docs-build
+docs-build: ## Build the static docs site to ./site (strict: fails on broken links)
+	$(VENV)/bin/mkdocs build --strict
+
+# =================================================================================
 # Combined / CI
 # =================================================================================
 .PHONY: test-all

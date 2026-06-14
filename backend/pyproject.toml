@@ -65,6 +65,10 @@ dev = [
     "ruff>=0.4",
     "httpx>=0.27",
 ]
+docs = [
+    # browsable documentation site (mkdocs serve / build)
+    "mkdocs-material>=9.5",
+]
 
 [project.entry-points."geosim.plugins"]
 # Third-party method bundles advertise themselves here (doc 08 §3.1).

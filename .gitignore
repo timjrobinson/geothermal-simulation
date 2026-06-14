@@ -41,3 +41,6 @@ scenarios/*/truth/
 # OS
 .DS_Store
 /.devdata/
+
+# MkDocs build output
+/site/

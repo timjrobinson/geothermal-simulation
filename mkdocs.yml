@@ -1,0 +1,89 @@
+site_name: Geothermal Underground Simulator — Docs
+site_description: >-
+  A from-scratch guide to fusing every subsurface survey method into one 3D earth
+  model — written for programmers who don't (yet) know geothermal engineering.
+docs_dir: docs
+site_dir: site
+
+theme:
+  name: material
+  palette:
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: deep orange
+      accent: amber
+      toggle: { icon: material/weather-sunny, name: Switch to light mode }
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: deep orange
+      accent: amber
+      toggle: { icon: material/weather-night, name: Switch to dark mode }
+  features:
+    - navigation.tabs
+    - navigation.sections
+    - navigation.top
+    - navigation.indexes
+    - navigation.footer
+    - toc.follow
+    - search.suggest
+    - search.highlight
+    - content.code.copy
+    - content.code.annotate
+
+markdown_extensions:
+  - admonition
+  - attr_list
+  - md_in_html
+  - footnotes
+  - tables
+  - toc:
+      permalink: true
+  - pymdownx.highlight:
+      anchor_linenums: true
+  - pymdownx.superfences
+  - pymdownx.inlinehilite
+  - pymdownx.snippets
+  - pymdownx.details
+  - pymdownx.tabbed:
+      alternate_style: true
+  - pymdownx.arithmatex:
+      generic: true
+  - pymdownx.emoji:
+      emoji_index: !!python/name:material.extensions.emoji.twemoji
+      emoji_generator: !!python/name:material.extensions.emoji.to_svg
+
+extra_javascript:
+  - js/mathjax.js
+  - https://unpkg.com/mathjax@3/es5/tex-mml-chtml.js
+
+nav:
+  - Home: index.md
+  - The Big Picture:
+      - What this simulator is: overview.md
+      - Geothermal energy, for programmers: geothermal-primer.md
+      - The core problem — many surveys, one earth: core-problem.md
+  - Foundations:
+      - Coordinates, depth & units: spatial-framework.md
+      - The data model: data-model.md
+  - The Survey Methods (the data):
+      - How to read these pages: survey-methods/index.md
+      - Gravity & magnetics (potential fields): survey-methods/potential-fields.md
+      - Electrical — ERT & IP: survey-methods/electrical.md
+      - Electromagnetic — TEM/AEM & MT: survey-methods/electromagnetic.md
+      - Seismic & microseismic: survey-methods/seismic.md
+      - InSAR — ground deformation: survey-methods/insar.md
+      - Boreholes — well logs & temperature: survey-methods/boreholes.md
+      - Geology & geochemistry: survey-methods/geology-geochem.md
+  - Merging the Data:
+      - Ingestion — raw files to primitives: ingestion.md
+      - Fusion — the fused earth model: fusion.md
+      - Rock physics & favorability: rock-physics.md
+      - Uncertainty & scientific honesty: uncertainty.md
+  - Using the Model:
+      - The 3D viewer: visualization.md
+      - Drilling & well planning: well-planning.md
+      - Forward modeling & inversion: inversion.md
+  - Reference:
+      - The synthetic data generator: synthetic-data.md
+      - Codebase architecture: architecture.md
+      - Glossary: glossary.md
